@@ -212,6 +212,21 @@ router.post('/:id/claim', (req, res) => {
     io.emit('orders_refresh');
   }
 
+  // Notify publisher via Telegram if publisher has telegram_chat_id
+  const publisher = db.getUser(order.publisher_id);
+  if (publisher && publisher.telegram_chat_id) {
+    telegramBotService.client.sendMessage(
+      publisher.telegram_chat_id,
+      `⚡ <b>Order Picked Up!</b>\n` +
+      `━━━━━━━━━━━━━━━━━━\n` +
+      `🆔 <b>Order ID:</b> <code>${order.id}</code>\n` +
+      `🏷️ <b>Ref:</b> <code>${order.merchant_reference || order.id}</code>\n` +
+      `👤 <b>Worker:</b> ${worker.name}\n` +
+      `⏳ <b>Status:</b> 🔵 <i>In Progress (Worker Scanning)...</i>`,
+      { parse_mode: 'HTML' }
+    ).catch(() => {});
+  }
+
   res.json({
     message: 'Order successfully claimed!',
     order: updatedOrder
@@ -346,6 +361,34 @@ router.post('/:id/complete-task', (req, res) => {
       workerResult: result
     });
     io.emit('orders_refresh');
+  }
+
+  // Notify publisher via Telegram if publisher has telegram_chat_id
+  const publisher = db.getUser(order.publisher_id);
+  if (publisher && publisher.telegram_chat_id) {
+    const worker = db.getUser(worker_id);
+    telegramBotService.client.sendMessage(
+      publisher.telegram_chat_id,
+      `🔔 <b>Worker Submitted Task!</b>\n` +
+      `━━━━━━━━━━━━━━━━━━\n` +
+      `🆔 <b>Order ID:</b> <code>${order.id}</code>\n` +
+      `🏷️ <b>Ref:</b> <code>${order.merchant_reference || order.id}</code>\n` +
+      `👤 <b>Worker:</b> ${worker?.name || worker_id}\n` +
+      `💰 <b>Scan Fee:</b> $${(order.rate || 0.70).toFixed(2)}\n` +
+      `━━━━━━━━━━━━━━━━━━\n` +
+      `Please verify whether the payment was received:`,
+      {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: '✅ Confirm & Deduct Fee', callback_data: `agent_verify:${order.id}:success` },
+              { text: '❌ Reject (Failed)', callback_data: `agent_verify:${order.id}:failed` }
+            ]
+          ]
+        }
+      }
+    ).catch(() => {});
   }
 
   res.json({

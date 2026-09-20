@@ -263,6 +263,43 @@ class PriorityQueueEngine {
       sessionDurationSeconds: 300
     };
   }
+
+  /**
+   * Get online worker presence count and 1hr / 24hr scan analytics for agents
+   * User Requirement: "show the agent how many workers are online okay so they can decide if they want to send or not and send last 1hr and 24hrs total count out of total done"
+   */
+  getOnlineWorkerStats() {
+    const now = Date.now();
+    let radarOnlineCount = 0;
+    for (const [workerId, session] of this.activeSessions.entries()) {
+      if (now < session.expiresAt) radarOnlineCount++;
+    }
+
+    const dbOnlineWorkers = db.getUsers().filter(u => u.role === 'worker' && u.is_online).length;
+    const effectiveOnline = Math.max(radarOnlineCount, dbOnlineWorkers, 1); // at least 1 in pool
+
+    const oneHourAgo = new Date(now - 3600 * 1000).toISOString();
+    const twentyFourHoursAgo = new Date(now - 86400 * 1000).toISOString();
+    const allOrders = db.getOrders();
+
+    const doneLast1h = allOrders.filter(o => o.created_at >= oneHourAgo && o.status === 'success').length;
+    const totalLast1h = allOrders.filter(o => o.created_at >= oneHourAgo).length;
+
+    const doneLast24h = allOrders.filter(o => o.created_at >= twentyFourHoursAgo && o.status === 'success').length;
+    const totalLast24h = allOrders.filter(o => o.created_at >= twentyFourHoursAgo).length;
+
+    const totalDoneAllTime = allOrders.filter(o => o.status === 'success').length;
+
+    return {
+      onlineWorkers: effectiveOnline,
+      radarOnlineCount,
+      doneLast1h,
+      totalLast1h,
+      doneLast24h,
+      totalLast24h,
+      totalDoneAllTime
+    };
+  }
 }
 
 export const priorityQueue = new PriorityQueueEngine();

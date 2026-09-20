@@ -54,6 +54,43 @@ export class TelegramClient {
   }
 
   /**
+   * Get file metadata (including file_path) from Telegram API
+   */
+  async getFile(fileId) {
+    if (!this.hasToken()) {
+      return { file_id: fileId, file_path: 'photos/simulated.jpg' };
+    }
+    try {
+      const res = await fetch(`${this.baseUrl}/getFile?file_id=${encodeURIComponent(fileId)}`);
+      const data = await res.json();
+      return data && data.ok ? data.result : null;
+    } catch (err) {
+      console.error('[TelegramClient] getFile error:', err.message);
+      return null;
+    }
+  }
+
+  /**
+   * Download binary file content from Telegram API
+   */
+  async downloadFile(filePath) {
+    if (!this.hasToken()) {
+      // In simulator / test mode, return a dummy buffer
+      return Buffer.from('simulated_qr_image_data');
+    }
+    try {
+      const url = `https://api.telegram.org/file/bot${this.token}/${filePath}`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const arrayBuffer = await res.arrayBuffer();
+      return Buffer.from(arrayBuffer);
+    } catch (err) {
+      console.error('[TelegramClient] downloadFile error:', err.message);
+      return null;
+    }
+  }
+
+  /**
    * Send a text message with optional reply_markup
    */
   async sendMessage(chatId, text, options = {}) {

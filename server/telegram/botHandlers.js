@@ -11,9 +11,12 @@
  * - FastScan Message Bot feedback forwarding
  */
 
-import { db } from '../db.js';
+import fs from 'fs';
+import path from 'path';
+import { db, generateMerchantReference } from '../db.js';
 import { priorityQueue } from './priorityQueue.js';
 import { TelegramClient } from './telegramClient.js';
+import { getIO } from '../sockets/socketHandler.js';
 
 export class TelegramBotService {
   constructor(client = null) {
@@ -50,12 +53,29 @@ export class TelegramBotService {
   }
 
   /**
-   * Handle text messages and commands
+   * Handle text messages, photo uploads, and commands
    */
   async handleMessage(msg) {
     const chatId = msg.chat?.id;
+    if (!chatId) return;
+
+    // 1. Check for Photo or Image Document upload (Agent Publishing in Telegram)
+    const photos = msg.photo;
+    const document = msg.document;
+    const isImageDoc = document && document.mime_type && document.mime_type.startsWith('image/');
+    const hasPhoto = (photos && photos.length > 0) || Boolean(isImageDoc);
+
+    // Find if user is already linked to this telegram chat
+    let linkedUser = db.getUsers().find(u => u.telegram_chat_id === chatId);
+
+    if (hasPhoto) {
+      // User sent a photo -> Handle as Agent QR Task Upload!
+      await this.handlePhotoUpload(chatId, msg, linkedUser);
+      return;
+    }
+
     const text = (msg.text || '').trim();
-    if (!chatId || !text) return;
+    if (!text) return;
 
     // Check user state (e.g. typing UTR for appeal or entering key)
     const state = this.userStates.get(chatId);
@@ -65,8 +85,21 @@ export class TelegramBotService {
       return;
     }
 
-    // Find if user is already linked to this telegram chat
-    const linkedUser = db.getUsers().find(u => u.telegram_chat_id === chatId);
+    // Switch or Link as Agent Mode
+    if (text === '/agent' || text === '/publisher' || text.toLowerCase() === 'agent mode') {
+      await this.linkOrCreateAgent(chatId, msg.from);
+      return;
+    }
+
+    // Switch or Link as Worker Mode
+    if (text === '/worker' || text.toLowerCase() === 'worker mode') {
+      if (linkedUser && linkedUser.role === 'agent') {
+        db.updateUser(linkedUser.id, { role: 'worker' });
+        linkedUser = db.getUser(linkedUser.id);
+      }
+      await this.sendDashboard(chatId, linkedUser);
+      return;
+    }
 
     // Command: /start
     if (text === '/start' || text.startsWith('/start ')) {
@@ -82,22 +115,73 @@ export class TelegramBotService {
         await this.client.sendMessage(
           chatId,
           `👋 <b>Welcome to FastScan UPI Platform Bot!</b>\n\n` +
-          `To link your account and start claiming UPI scan tasks, please reply with your <b>Joining Key</b>.\n\n` +
-          `🔑 <i>Example:</i> <code>L2-WORKER-RAHUL-7821</code> or <code>SUB-ALEX-4921</code>`,
-          { parse_mode: 'HTML' }
+          `You can use this bot as an <b>Agent (Publisher)</b> or a <b>Worker (Scanner)</b>.\n\n` +
+          `• <b>Publishers / Agents:</b> Send <code>/agent</code> or reply with your Agent Key (<code>L1-BOSS-DEMO-991</code>) to start uploading UPI QR codes directly here!\n` +
+          `• <b>Workers / Scanners:</b> Reply with your Worker Joining Key (e.g. <code>L2-WORKER-DEMO-442</code>) to scan & earn.\n\n` +
+          `👇 <i>Choose your portal below to begin immediately:</i>`,
+          {
+            parse_mode: 'HTML',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '🏢 Enter Agent Portal (Upload QR)', callback_data: 'activate_agent' }],
+                [{ text: '👥 Enter Worker Portal (Scan & Earn)', callback_data: 'activate_worker' }]
+              ]
+            }
+          }
         );
       }
       return;
     }
 
-    // If message looks like a Joining Key or worker is not linked yet
-    if (text.startsWith('KEY-') || text.startsWith('L1-') || text.startsWith('L2-') || text.startsWith('SUB-') || (!linkedUser && text !== '/start')) {
+    // If message looks like a Joining Key
+    if (text.startsWith('KEY-') || text.startsWith('L1-') || text.startsWith('L2-') || text.startsWith('SUB-')) {
       await this.linkUserByKey(chatId, text);
       return;
     }
 
-    // Worker commands (requires linked worker)
-    if (linkedUser) {
+    // ==========================================
+    // AGENT / PUBLISHER COMMANDS
+    // ==========================================
+    if (linkedUser && (linkedUser.role === 'agent' || linkedUser.role === 'boss')) {
+      if (text === '/upload' || text.includes('Upload QR Task')) {
+        await this.client.sendMessage(
+          chatId,
+          `📸 <b>UPLOAD UPI QR TASK</b>\n` +
+          `━━━━━━━━━━━━━━━━━━\n` +
+          `Please send or forward your <b>UPI QR Code Photo</b> directly into this chat.\n\n` +
+          `💡 <i>Optional Caption Format:</i>\n` +
+          `<code>150 paytm@okaxis 5m</code>\n` +
+          `<i>(Amount, UPI link/ID, and Expiry minutes)</i>`,
+          { parse_mode: 'HTML' }
+        );
+        return;
+      }
+
+      if (text === '/online' || text.includes('Online Workers')) {
+        await this.sendOnlineWorkerStats(chatId);
+        return;
+      }
+
+      if (text === '/balance' || text === '/topup' || text.includes('Balance') || text.includes('Top-up')) {
+        await this.sendAgentBalanceAndTopup(chatId, linkedUser);
+        return;
+      }
+
+      if (text === '/tasks' || text === '/agenttasks' || text.includes('My Tasks Status')) {
+        await this.sendAgentTasks(chatId, linkedUser);
+        return;
+      }
+
+      if (text.includes('Refresh')) {
+        await this.sendAgentDashboard(chatId, linkedUser);
+        return;
+      }
+    }
+
+    // ==========================================
+    // WORKER COMMANDS (Requires linked worker)
+    // ==========================================
+    if (linkedUser && linkedUser.role === 'worker') {
       if (text === '/scan' || text.includes('Scan for Orders') || text.includes('Scan Again')) {
         await this.startWorkerRadar(chatId, linkedUser);
         return;
@@ -133,14 +217,22 @@ export class TelegramBotService {
       }
     }
 
-    // Unrecognized text fallback
+    // Fallback if not recognized
     if (linkedUser) {
       await this.sendDashboard(chatId, linkedUser);
     } else {
       await this.client.sendMessage(
         chatId,
-        `⚠️ <i>Account not linked yet.</i>\nPlease enter your Joining Key (e.g. <code>L2-WORKER-XXXX</code>) to activate.`,
-        { parse_mode: 'HTML' }
+        `⚠️ <i>Account not linked yet.</i>\nSend <code>/agent</code> to publish tasks, or enter your Worker Key (e.g. <code>L2-WORKER-DEMO-442</code>).`,
+        {
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🏢 Activate Agent Account', callback_data: 'activate_agent' }],
+              [{ text: '👥 Activate Worker Account', callback_data: 'activate_worker' }]
+            ]
+          }
+        }
       );
     }
   }
@@ -349,10 +441,115 @@ export class TelegramBotService {
     const callbackId = cb.id;
     const chatId = cb.message?.chat?.id;
     const data = cb.data || '';
-    const linkedUser = db.getUsers().find(u => u.telegram_chat_id === chatId);
+    let linkedUser = db.getUsers().find(u => u.telegram_chat_id === chatId);
+
+    // 0. Activation / Switch Portal (Works even if not linked yet)
+    if (data === 'activate_agent') {
+      linkedUser = await this.linkOrCreateAgent(chatId, cb.from);
+      await this.client.answerCallbackQuery(callbackId, 'Welcome to Agent Portal!');
+      return;
+    }
+
+    if (data === 'activate_worker') {
+      linkedUser = await this.linkOrCreateWorker(chatId, cb.from);
+      await this.client.answerCallbackQuery(callbackId, 'Welcome to Worker Portal!');
+      return;
+    }
 
     if (!linkedUser) {
-      await this.client.answerCallbackQuery(callbackId, 'Please enter your Joining Key first.', true);
+      await this.client.answerCallbackQuery(callbackId, 'Please link your account first.', true);
+      return;
+    }
+
+    // Agent Upload Prompt
+    if (data === 'agent_upload_prompt') {
+      await this.client.answerCallbackQuery(callbackId);
+      await this.client.sendMessage(
+        chatId,
+        `📸 <b>SEND QR CODE PHOTO</b>\n\nPlease send or forward your UPI QR code image right here.\nOptional caption: <code>150 paytm@okaxis 5m</code>`
+      );
+      return;
+    }
+
+    // Agent Top-up $5 ($0.70/scan)
+    if (data.startsWith('agent_topup:')) {
+      const parts = data.split(':');
+      const amount = parseFloat(parts[2] || parts[1]) || 5;
+      const targetUser = linkedUser || db.getUser(parts[1]);
+      if (targetUser) {
+        const newBal = +((targetUser.balance || 0) + amount).toFixed(2);
+        db.updateUser(targetUser.id, {
+          balance: newBal,
+          scan_rate: 0.70,
+          active_tier: 'starter_5'
+        });
+        await this.client.answerCallbackQuery(callbackId, `Added $${amount}! Rate: $0.70/scan`);
+        await this.client.sendMessage(
+          chatId,
+          `🎉 <b>Top-up Successful!</b>\n` +
+          `💰 Added: <b>+$${amount}.00</b>\n` +
+          `💳 New Balance: <b>$${newBal.toFixed(2)}</b>\n` +
+          `⚡ Active Scan Rate: <b>$0.70/scan</b>\n\n` +
+          `📸 You can now send any QR Code photo to publish immediately!`,
+          { parse_mode: 'HTML', reply_markup: this.getMainKeyboard(targetUser) }
+        );
+      }
+      return;
+    }
+
+    // Agent $10 Loan ($0.67/scan)
+    if (data.startsWith('agent_loan:')) {
+      const parts = data.split(':');
+      const amount = parseFloat(parts[2] || parts[1]) || 10;
+      const targetUser = linkedUser || db.getUser(parts[1]);
+      if (targetUser) {
+        const newBal = +((targetUser.balance || 0) + amount).toFixed(2);
+        db.updateUser(targetUser.id, {
+          balance: newBal,
+          scan_rate: 0.67,
+          active_tier: 'instant_loan_10'
+        });
+        await this.client.answerCallbackQuery(callbackId, `Activated $10 Loan! Rate: $0.67/scan`);
+        await this.client.sendMessage(
+          chatId,
+          `🚀 <b>Instant $10 Credit Loan Activated!</b>\n` +
+          `💰 Balance: <b>$${newBal.toFixed(2)}</b>\n` +
+          `⚡ Discounted Rate: <b>$0.67/scan</b> (Tier Loan)\n\n` +
+          `📸 Send any QR Code photo now to broadcast to online workers!`,
+          { parse_mode: 'HTML', reply_markup: this.getMainKeyboard(targetUser) }
+        );
+      }
+      return;
+    }
+
+    // Agent Verify Task
+    if (data.startsWith('agent_verify:')) {
+      const [, orderId, result] = data.split(':');
+      await this.processAgentVerification(chatId, linkedUser, orderId, result, callbackId);
+      return;
+    }
+
+    // Agent Undo Verification
+    if (data.startsWith('agent_undo:')) {
+      const orderId = data.replace('agent_undo:', '');
+      await this.processAgentUndo(chatId, linkedUser, orderId, callbackId);
+      return;
+    }
+
+    // Agent Order Status
+    if (data.startsWith('agent_order_status:')) {
+      const orderId = data.replace('agent_order_status:', '');
+      const ord = db.getOrder(orderId);
+      if (ord) {
+        const statusText = ord.status === 'pending' ? '🟡 Waiting for Pickup'
+          : ord.status === 'claimed' ? `🔵 In Progress (Claimed by ${ord.claimed_by_name || 'Worker'})`
+          : ord.status === 'awaiting_confirmation' ? '🟣 Completed by worker (Waiting your approval)'
+          : ord.status === 'success' ? '🟢 Verified & Paid'
+          : ord.status;
+        await this.client.answerCallbackQuery(callbackId, `Status: ${statusText}`, true);
+      } else {
+        await this.client.answerCallbackQuery(callbackId, 'Order not found.', true);
+      }
       return;
     }
 
@@ -913,9 +1110,552 @@ export class TelegramBotService {
   }
 
   /**
-   * Persistent Reply Keyboard for Telegram mobile client
+   * Link or switch chat to Agent Portal
+   */
+  async linkOrCreateAgent(chatId, fromUser) {
+    let agent = db.getUsers().find(u => u.telegram_chat_id === chatId);
+    if (!agent) {
+      // Find default agent or create new agent
+      const defaultAgent = db.getUsers().find(u => u.id === 'agent_prime');
+      if (defaultAgent && !defaultAgent.telegram_chat_id) {
+        agent = defaultAgent;
+        db.updateUser(agent.id, { telegram_chat_id: chatId });
+      } else {
+        const agentName = fromUser?.first_name ? `${fromUser.first_name} (Agent)` : 'Alpha Agent';
+        agent = {
+          id: `agent_tg_${chatId}`,
+          role: 'agent',
+          name: agentName,
+          balance: 10.00,
+          scan_rate: 0.67,
+          active_tier: 'instant_loan_10',
+          telegram_chat_id: chatId,
+          created_at: new Date().toISOString()
+        };
+        db.addUser(agent);
+      }
+    } else if (agent.role !== 'agent' && agent.role !== 'boss') {
+      db.updateUser(agent.id, {
+        role: 'agent',
+        balance: agent.balance && agent.balance >= 5 ? agent.balance : 10.00,
+        scan_rate: 0.67,
+        active_tier: 'instant_loan_10'
+      });
+      agent = db.getUser(agent.id);
+    }
+
+    await this.sendAgentDashboard(chatId, agent);
+    return agent;
+  }
+
+  /**
+   * Link or switch chat to Worker Portal
+   */
+  async linkOrCreateWorker(chatId, fromUser) {
+    let worker = db.getUsers().find(u => u.telegram_chat_id === chatId);
+    if (!worker) {
+      const defaultWorker = db.getUsers().find(u => u.id === 'worker_alex');
+      if (defaultWorker && !defaultWorker.telegram_chat_id) {
+        worker = defaultWorker;
+        db.updateUser(worker.id, { telegram_chat_id: chatId });
+      } else {
+        const workerName = fromUser?.first_name ? `${fromUser.first_name} (Worker)` : 'Alex Worker';
+        worker = {
+          id: `worker_tg_${chatId}`,
+          role: 'worker',
+          name: workerName,
+          level: 1,
+          parent_id: null,
+          balance: 0.00,
+          consecutive_failures: 0,
+          timeout_until: null,
+          is_banned: false,
+          total_personal_completed: 0,
+          total_team_completed: 0,
+          is_online: false,
+          telegram_chat_id: chatId,
+          created_at: new Date().toISOString()
+        };
+        db.addUser(worker);
+      }
+    } else if (worker.role !== 'worker') {
+      db.updateUser(worker.id, { role: 'worker' });
+      worker = db.getUser(worker.id);
+    }
+
+    await this.sendDashboard(chatId, worker);
+    return worker;
+  }
+
+  /**
+   * Handle Photo Upload from Agent (Publishing QR task in Telegram)
+   * User Requirement: "and i want agent to upload in telegram only"
+   */
+  async handlePhotoUpload(chatId, msg, user) {
+    const photos = msg.photo;
+    const document = msg.document;
+    const largestPhoto = photos && photos.length > 0 ? photos[photos.length - 1] : document;
+    const caption = (msg.caption || '').trim();
+
+    // If unlinked, auto-link as Agent
+    let agent = user;
+    if (!agent || (agent.role !== 'agent' && agent.role !== 'boss')) {
+      agent = await this.linkOrCreateAgent(chatId, msg.from);
+    }
+
+    const agentBalance = +(agent.balance || 0).toFixed(2);
+    const scanRate = agent.scan_rate !== undefined ? agent.scan_rate : (agentBalance >= 10 ? 0.67 : 0.70);
+
+    if (agentBalance < scanRate) {
+      await this.client.sendMessage(
+        chatId,
+        `⚠️ <b>Insufficient Prepaid Balance!</b>\n` +
+        `━━━━━━━━━━━━━━━━━━\n` +
+        `💰 Current Balance: <b>$${agentBalance.toFixed(2)}</b>\n` +
+        `⚡ Required Scan Rate: <b>$${scanRate.toFixed(2)}/scan</b>\n\n` +
+        `Please top up balance or take an instant loan below to publish:`,
+        {
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🟢 Add $5 ($0.70/scan)', callback_data: `agent_topup:${agent.id}:5` }],
+              [{ text: '🚀 Take $10 Instant Loan ($0.67/scan)', callback_data: `agent_loan:${agent.id}:10` }]
+            ]
+          }
+        }
+      );
+      return;
+    }
+
+    // Try downloading the photo
+    let savedLocalPath = null;
+    if (largestPhoto && largestPhoto.file_id) {
+      try {
+        const fileInfo = await this.client.getFile(largestPhoto.file_id);
+        if (fileInfo && fileInfo.file_path) {
+          const buffer = await this.client.downloadFile(fileInfo.file_path);
+          if (buffer) {
+            const uploadsDir = path.join(process.cwd(), 'server', 'uploads');
+            if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+            const filename = `qr_tg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}.jpg`;
+            fs.writeFileSync(path.join(uploadsDir, filename), buffer);
+            savedLocalPath = `/uploads/${filename}`;
+          }
+        }
+      } catch (err) {
+        console.error('[botHandlers] Failed to download photo:', err.message);
+      }
+    }
+
+    // Parse caption for duration, UPI ID, or amount
+    let duration = 300;
+    const minMatch = caption.match(/(\d+)\s*(?:m|min|mins|minutes)/i);
+    const secMatch = caption.match(/(\d+)\s*(?:s|sec|seconds)/i);
+    if (minMatch) duration = parseInt(minMatch[1], 10) * 60;
+    else if (secMatch) duration = parseInt(secMatch[1], 10);
+
+    let upiLink = '';
+    const upiMatch = caption.match(/(upi:\/\/[^\s]+)/i);
+    const paMatch = caption.match(/pa=([a-zA-Z0-9.\-_@]+)/i);
+    const upiIdMatch = caption.match(/\b([a-zA-Z0-9.\-_]+@[a-zA-Z0-9]+)\b/);
+    const amMatch = caption.match(/(?:am|amount|rs|inr|\₹)\s*[:=]?\s*([0-9.]+)/i) || caption.match(/\b([0-9]{2,6}(?:\.[0-9]{1,2})?)\b/);
+
+    if (upiMatch) {
+      upiLink = upiMatch[1];
+    } else if (paMatch || upiIdMatch) {
+      const pa = paMatch ? paMatch[1] : upiIdMatch[1];
+      const am = amMatch ? amMatch[1] : '150.00';
+      upiLink = `upi://pay?pa=${pa}&pn=${encodeURIComponent(agent.name)}&am=${am}&cu=INR`;
+    } else {
+      const amount = amMatch ? amMatch[1] : '150.00';
+      upiLink = `upi://pay?pa=merchant_${agent.id.substring(0, 8)}@okaxis&pn=${encodeURIComponent(agent.name)}&am=${amount}&cu=INR`;
+    }
+
+    const ref = generateMerchantReference(agent.name);
+    const orderId = `ord_tg_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 6)}`;
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + duration * 1000).toISOString();
+
+    const newOrder = {
+      id: orderId,
+      merchant_reference: ref,
+      publisher_id: agent.id,
+      publisher_name: agent.name,
+      upi_link: upiLink,
+      qr_image_url: savedLocalPath || `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(upiLink)}`,
+      duration_seconds: duration,
+      rate: scanRate,
+      worker_rate: agent.worker_rate || 0.40,
+      status: 'pending',
+      claimed_by: null,
+      claimed_by_name: null,
+      claimed_by_level: null,
+      claimed_by_parent_id: null,
+      worker_status: 'none',
+      created_at: now.toISOString(),
+      claimed_at: null,
+      worker_completed_at: null,
+      confirmed_at: null,
+      expires_at: expiresAt
+    };
+
+    db.addOrder(newOrder);
+
+    // Broadcast to web socket workers
+    try {
+      const io = getIO();
+      if (io) {
+        io.emit('new_order_available', newOrder);
+        io.emit('orders_refresh');
+      }
+    } catch (e) {}
+
+    // Alert Telegram active radar workers
+    this.onNewOrderAvailable(newOrder);
+
+    const stats = priorityQueue.getOnlineWorkerStats();
+    await this.client.sendMessage(
+      chatId,
+      `✅ <b>QR TASK UPLOADED & LIVE!</b>\n` +
+      `━━━━━━━━━━━━━━━━━━\n` +
+      `🆔 <b>Order ID:</b> <code>${newOrder.id}</code>\n` +
+      `🏷️ <b>Ref:</b> <code>${newOrder.merchant_reference}</code>\n` +
+      `⏱️ <b>Timer:</b> ${Math.round(duration / 60)} Minutes (Priority Queue)\n` +
+      `💰 <b>Scan Fee:</b> $${scanRate.toFixed(2)} (deducted on confirmed scan)\n` +
+      `👥 <b>Fleet Radar:</b> <b>${stats.onlineWorkers} workers online</b>\n` +
+      `━━━━━━━━━━━━━━━━━━\n` +
+      `⏳ <b>Status:</b> 🟡 <i>Waiting for worker pickup...</i>\n\n` +
+      `<i>⚡ You will receive an instant alert right here the moment a worker picks up this QR!</i>`,
+      {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '📊 Track Order Status', callback_data: `agent_order_status:${newOrder.id}` }],
+            [{ text: '📤 Upload Another QR', callback_data: 'agent_upload_prompt' }]
+          ]
+        }
+      }
+    );
+  }
+
+  /**
+   * Send Agent Portal Dashboard
+   */
+  async sendAgentDashboard(chatId, agent) {
+    const stats = priorityQueue.getOnlineWorkerStats();
+    const balance = +(agent.balance || 0).toFixed(2);
+    const scanRate = agent.scan_rate !== undefined ? agent.scan_rate : (balance >= 10 ? 0.67 : 0.70);
+
+    const myOrders = db.getOrders().filter(o => o.publisher_id === agent.id);
+    const waitingCount = myOrders.filter(o => o.status === 'pending').length;
+    const inProgressCount = myOrders.filter(o => o.status === 'claimed').length;
+    const completedCount = myOrders.filter(o => o.status === 'success').length;
+
+    await this.client.sendMessage(
+      chatId,
+      `🏢 <b>AGENT / PUBLISHER PORTAL</b>\n` +
+      `━━━━━━━━━━━━━━━━━━\n` +
+      `👤 <b>Agent:</b> ${agent.name}\n` +
+      `💰 <b>Prepaid Balance:</b> <b>$${balance.toFixed(2)}</b>\n` +
+      `⚡ <b>Scan Rate:</b> <b>$${scanRate.toFixed(2)}/scan</b>\n\n` +
+      `👥 <b>Worker Fleet Radar:</b>\n` +
+      `• Online Right Now: <b>${stats.onlineWorkers} workers</b>\n` +
+      `• Last 1hr Completed: <b>${stats.doneLast1h}</b> / ${stats.totalLast1h}\n` +
+      `• Last 24hr Completed: <b>${stats.doneLast24h}</b> / ${stats.totalLast24h}\n\n` +
+      `📊 <b>Your Tasks:</b>\n` +
+      `• 🟡 Waiting for Pickup: <b>${waitingCount}</b>\n` +
+      `• 🔵 In Progress: <b>${inProgressCount}</b>\n` +
+      `• 🟢 Completed: <b>${completedCount}</b>\n` +
+      `━━━━━━━━━━━━━━━━━━\n` +
+      `📸 <b>TO PUBLISH A TASK:</b>\n` +
+      `<b>Send any QR Code image directly into this chat!</b>\n` +
+      `<i>(Optional: Add caption like "150 myupi@okaxis 5m")</i>`,
+      {
+        parse_mode: 'HTML',
+        reply_markup: this.getMainKeyboard(agent)
+      }
+    );
+  }
+
+  /**
+   * Send Online Worker Fleet statistics to Agent
+   * User Requirement: "show the agent how many workers are online okay so they can decide if they want to send or not and send last 1hr and 24hrs total count out of total done"
+   */
+  async sendOnlineWorkerStats(chatId) {
+    const stats = priorityQueue.getOnlineWorkerStats();
+    await this.client.sendMessage(
+      chatId,
+      `👥 <b>WORKER FLEET RADAR & ANALYTICS</b>\n` +
+      `━━━━━━━━━━━━━━━━━━\n` +
+      `🟢 <b>Online Workers Right Now:</b> <b>${stats.onlineWorkers} active</b>\n` +
+      `📡 <b>Active 5-Min Radars:</b> ${stats.radarOnlineCount} scanning\n\n` +
+      `📊 <b>Scan Activity History:</b>\n` +
+      `• Last 1 Hour: <b>${stats.doneLast1h} completed</b> (out of ${stats.totalLast1h} submitted)\n` +
+      `• Last 24 Hours: <b>${stats.doneLast24h} completed</b> (out of ${stats.totalLast24h} submitted)\n` +
+      `• All-Time Done: <b>${stats.totalDoneAllTime} scans</b>\n` +
+      `━━━━━━━━━━━━━━━━━━\n` +
+      `✅ <i>Workers are online! You can safely send QR tasks now.</i>`,
+      {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '📤 Upload QR Task Now', callback_data: 'agent_upload_prompt' }]
+          ]
+        }
+      }
+    );
+  }
+
+  /**
+   * Send Agent Balance and Top-up packages
+   * User Requirement: "agents they will pay on each scan let them add balance in the website like 5$ one time and they can scan 0.7$ per scan loan 10$ and scan at 0.67$ like that"
+   */
+  async sendAgentBalanceAndTopup(chatId, agent) {
+    const balance = +(agent.balance || 0).toFixed(2);
+    const scanRate = agent.scan_rate !== undefined ? agent.scan_rate : (balance >= 10 ? 0.67 : 0.70);
+
+    await this.client.sendMessage(
+      chatId,
+      `💰 <b>AGENT PREPAID BALANCE</b>\n` +
+      `━━━━━━━━━━━━━━━━━━\n` +
+      `💳 <b>Current Balance:</b> <b>$${balance.toFixed(2)}</b>\n` +
+      `⚡ <b>Active Scan Rate:</b> <b>$${scanRate.toFixed(2)}/scan</b>\n\n` +
+      `<b>Choose a package to top-up:</b>\n` +
+      `• <b>$5 Starter:</b> Scan rate = <b>$0.70/scan</b>\n` +
+      `• <b>$10 Instant Credit Loan:</b> Scan rate = <b>$0.67/scan</b> (Max Savings)\n` +
+      `━━━━━━━━━━━━━━━━━━\n` +
+      `<i>Fees are only deducted when a worker scan is successfully confirmed.</i>`,
+      {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '🟢 Add $5 ($0.70/scan)', callback_data: `agent_topup:${agent.id}:5` }],
+            [{ text: '🚀 Take $10 Loan ($0.67/scan)', callback_data: `agent_loan:${agent.id}:10` }]
+          ]
+        }
+      }
+    );
+  }
+
+  /**
+   * Send Agent published tasks list
+   */
+  async sendAgentTasks(chatId, agent) {
+    const myOrders = db.getOrders()
+      .filter(o => o.publisher_id === agent.id)
+      .slice(-6)
+      .reverse();
+
+    if (myOrders.length === 0) {
+      await this.client.sendMessage(
+        chatId,
+        `📋 <b>No Tasks Published Yet</b>\n\nSend any QR Code photo directly into this chat to publish your first task!`,
+        { parse_mode: 'HTML', reply_markup: this.getMainKeyboard(agent) }
+      );
+      return;
+    }
+
+    let msg = `📊 <b>YOUR RECENT PUBLISHED TASKS:</b>\n━━━━━━━━━━━━━━━━━━\n`;
+    for (const ord of myOrders) {
+      const statusIcon = ord.status === 'pending' ? '🟡 Waiting for Pickup'
+        : ord.status === 'claimed' ? `🔵 In Progress (${ord.claimed_by_name || 'Claimed'})`
+        : ord.status === 'awaiting_confirmation' ? `🟣 Worker Submitted UTR (Review)`
+        : ord.status === 'success' ? '🟢 Verified & Paid'
+        : '⚪ ' + ord.status;
+
+      msg += `🆔 <code>${ord.id}</code>\n`;
+      msg += `🏷️ ${ord.merchant_reference || ord.id}\n`;
+      msg += `⏳ Status: <b>${statusIcon}</b>\n`;
+      msg += `💰 Fee: $${(ord.rate || 0.70).toFixed(2)}\n`;
+      msg += `──────────────────\n`;
+    }
+
+    await this.client.sendMessage(chatId, msg, {
+      parse_mode: 'HTML',
+      reply_markup: this.getMainKeyboard(agent)
+    });
+  }
+
+  /**
+   * Process Agent manual verification from Telegram
+   */
+  async processAgentVerification(chatId, agent, orderId, result, callbackId) {
+    const order = db.getOrder(orderId);
+    if (!order) {
+      await this.client.answerCallbackQuery(callbackId, 'Order not found.', true);
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const config = db.getConfig();
+    const publisher = db.getUser(order.publisher_id);
+    const worker = order.claimed_by ? db.getUser(order.claimed_by) : null;
+    const scanFee = order.rate || 0.70;
+    const reward = order.worker_rate || config.worker_payout_per_scan || 0.40;
+
+    if (result === 'success') {
+      if (publisher) {
+        const newBal = Math.max(0, +(publisher.balance || 0) - scanFee);
+        db.updateUser(publisher.id, {
+          balance: +newBal.toFixed(2),
+          total_spent: +((publisher.total_spent || 0) + scanFee).toFixed(2),
+          total_scans: (publisher.total_scans || 0) + 1
+        });
+      }
+
+      if (worker) {
+        db.updateUser(worker.id, {
+          balance: +((worker.balance || 0) + reward).toFixed(2),
+          total_personal_completed: (worker.total_personal_completed || 0) + 1,
+          consecutive_failures: 0
+        });
+
+        if (worker.telegram_chat_id) {
+          await this.client.sendMessage(
+            worker.telegram_chat_id,
+            `🎉 <b>Payment Verified by Agent!</b>\nOrder <code>${order.id}</code> confirmed.\n<b>+$${reward.toFixed(2)}</b> credited to your balance!`
+          );
+        }
+      }
+
+      db.updateOrder(orderId, {
+        status: 'success',
+        confirmed_at: now,
+        manually_verified_by: agent ? agent.name : 'Agent via Telegram',
+        is_manually_verified: true
+      });
+
+      try {
+        const io = getIO();
+        if (io) {
+          io.emit('order_confirmed', { orderId, status: 'success' });
+          io.emit('orders_refresh');
+        }
+      } catch (e) {}
+
+      await this.client.answerCallbackQuery(callbackId, 'Verified as SUCCESS!');
+      await this.client.sendMessage(
+        chatId,
+        `✅ <b>Order ${order.id} Confirmed as SUCCESS!</b>\n` +
+        `━━━━━━━━━━━━━━━━━━\n` +
+        `💰 Scan fee of <b>$${scanFee.toFixed(2)}</b> deducted.\n` +
+        `💳 Remaining Balance: <b>$${(publisher?.balance || 0).toFixed(2)}</b>\n` +
+        `👤 Worker: <b>${worker?.name || 'Worker'}</b> credited +$${reward.toFixed(2)}.\n\n` +
+        `<i>Made a mistake? Tap Undo below to revert:</i>`,
+        {
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '↩️ Undo Verify', callback_data: `agent_undo:${order.id}` }]
+            ]
+          }
+        }
+      );
+    } else {
+      // Reject
+      db.updateOrder(orderId, {
+        status: 'trial_not_activated',
+        confirmed_at: now,
+        is_manually_verified: true,
+        manually_verified_by: agent ? agent.name : 'Agent via Telegram'
+      });
+
+      if (worker && worker.telegram_chat_id) {
+        await this.client.sendMessage(
+          worker.telegram_chat_id,
+          `⚠️ <b>Order ${order.id} Rejected:</b> Agent marked payment as not received.\nIf this was a mistake, you can submit an Appeal with UTR proof.`
+        );
+      }
+
+      await this.client.answerCallbackQuery(callbackId, 'Marked as Rejected/Failed.');
+      await this.client.sendMessage(
+        chatId,
+        `❌ <b>Order ${order.id} Marked as Failed / Not Activated.</b>\nNo scan fee deducted.`
+      );
+    }
+  }
+
+  /**
+   * Process Agent undoing verification
+   * User Requirement: "allow agents to undo if they made error in verifying"
+   */
+  async processAgentUndo(chatId, agent, orderId, callbackId) {
+    const order = db.getOrder(orderId);
+    if (!order) {
+      await this.client.answerCallbackQuery(callbackId, 'Order not found.', true);
+      return;
+    }
+
+    const config = db.getConfig();
+    const publisher = db.getUser(order.publisher_id);
+    const worker = order.claimed_by ? db.getUser(order.claimed_by) : null;
+    const scanFee = order.rate || 0.70;
+    const reward = order.worker_rate || config.worker_payout_per_scan || 0.40;
+
+    if (publisher) {
+      const restoredBal = +((publisher.balance || 0) + scanFee).toFixed(2);
+      db.updateUser(publisher.id, {
+        balance: restoredBal,
+        total_spent: Math.max(0, +((publisher.total_spent || 0) - scanFee).toFixed(2)),
+        total_scans: Math.max(0, (publisher.total_scans || 0) - 1)
+      });
+    }
+
+    if (worker) {
+      db.updateUser(worker.id, {
+        balance: Math.max(0, +((worker.balance || 0) - reward).toFixed(2)),
+        total_personal_completed: Math.max(0, (worker.total_personal_completed || 0) - 1)
+      });
+    }
+
+    db.updateOrder(orderId, {
+      status: 'awaiting_confirmation',
+      confirmed_at: null,
+      is_manually_verified: false
+    });
+
+    try {
+      const io = getIO();
+      if (io) io.emit('orders_refresh');
+    } catch (e) {}
+
+    await this.client.answerCallbackQuery(callbackId, 'Verification Undone!');
+    await this.client.sendMessage(
+      chatId,
+      `↩️ <b>Verification Undone for ${order.id}!</b>\n` +
+      `━━━━━━━━━━━━━━━━━━\n` +
+      `💰 <b>$${scanFee.toFixed(2)} refunded</b> to your prepaid balance.\n` +
+      `💳 Current Balance: <b>$${(publisher?.balance || 0).toFixed(2)}</b>\n` +
+      `Order status reverted to <i>Awaiting Review</i>.`,
+      {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: '✅ Re-confirm Success', callback_data: `agent_verify:${order.id}:success` },
+              { text: '❌ Reject (Failed)', callback_data: `agent_verify:${order.id}:failed` }
+            ]
+          ]
+        }
+      }
+    );
+  }
+
+  /**
+   * Persistent Reply Keyboard for Telegram client
    */
   getMainKeyboard(user) {
+    if (user && (user.role === 'agent' || user.role === 'boss')) {
+      return {
+        keyboard: [
+          [{ text: '📤 Upload QR Task' }, { text: '👥 Online Workers' }],
+          [{ text: '💰 Balance & Top-up' }, { text: '📊 My Tasks Status' }],
+          [{ text: '🔄 Refresh Dashboard' }]
+        ],
+        resize_keyboard: true
+      };
+    }
+
     return {
       keyboard: [
         [{ text: '🔍 Scan for Orders (5 Min)' }, { text: '📥 Request 3 Orders' }],
