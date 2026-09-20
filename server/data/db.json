@@ -694,7 +694,7 @@
       "duration_seconds": 300,
       "rate": 0.7,
       "worker_rate": 0.75,
-      "status": "pending",
+      "status": "expired",
       "claimed_by": null,
       "claimed_by_name": null,
       "claimed_by_level": null,
@@ -704,7 +704,8 @@
       "claimed_at": null,
       "worker_completed_at": null,
       "confirmed_at": null,
-      "expires_at": "2026-09-20T01:47:56.255Z"
+      "expires_at": "2026-09-20T01:47:56.255Z",
+      "expired_at": "2026-09-20T01:47:56.550Z"
     },
     {
       "id": "ord_mu93bhlr_an3g",
