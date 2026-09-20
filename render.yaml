@@ -3,8 +3,7 @@ services:
     name: fastscan-platform
     env: node
     plan: free
-    rootDir: .
-    buildCommand: npm --prefix server install && npm --prefix client install && npm --prefix client run build
+    buildCommand: npm install && npm run build
     startCommand: npm start
     envVars:
       - key: NODE_ENV

@@ -9,19 +9,7 @@ export default defineConfig({
   plugins: [react()],
   root: __dirname,
   build: {
-    outDir: path.resolve(__dirname, 'dist')
-  },
-  server: {
-    port: 5173,
-    proxy: {
-      '/api': {
-        target: 'http://localhost:5000',
-        changeOrigin: true
-      },
-      '/uploads': {
-        target: 'http://localhost:5000',
-        changeOrigin: true
-      }
-    }
+    outDir: path.resolve(__dirname, 'dist'),
+    emptyOutDir: true
   }
 });
