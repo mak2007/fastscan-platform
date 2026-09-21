@@ -382,8 +382,8 @@ router.post('/:id/complete-task', (req, res) => {
         reply_markup: {
           inline_keyboard: [
             [
-              { text: '✅ Confirm & Deduct Fee', callback_data: `agent_verify:${order.id}:success` },
-              { text: '❌ Reject (Failed)', callback_data: `agent_verify:${order.id}:failed` }
+              { text: `✅ Confirm Success (-$${(order.rate || 0.70).toFixed(2)})`, callback_data: `agent_verify:${order.id}:success` },
+              { text: '❌ Reject / Unsuccess (-$0.05)', callback_data: `agent_verify:${order.id}:failed` }
             ]
           ]
         }
@@ -497,14 +497,36 @@ router.post('/:id/confirm', (req, res) => {
 
   } else {
     // --- FAILED / TRIAL NOT ACTIVATED PATH ---
+    const unsuccessFee = 0.05;
     const updatedOrder = db.updateOrder(orderId, {
       status: 'trial_not_activated',
-      confirmed_at: now
+      confirmed_at: now,
+      unsuccess_fee: unsuccessFee
     });
 
-    // Worker Penalty logic:
-    // "if someone doesnt completes an order success 2 times in a row give them 2 minutes timeout and 4 = 30min timeout 6= ban"
+    // Deduct $0.05 unsuccess fee from Publisher
+    // User Requirement: "deduct there 0.05 if its unsuccess"
+    if (publisher) {
+      const newBal = Math.max(0, +((publisher.balance || 0) - unsuccessFee).toFixed(2));
+      const newSpent = +((publisher.total_spent || 0) + unsuccessFee).toFixed(2);
+      db.updateUser(publisher.id, {
+        balance: newBal,
+        total_spent: newSpent
+      });
+
+      const io = getIO();
+      if (io) {
+        io.emit('publisher_balance_updated', {
+          publisherId: publisher.id,
+          balance: newBal,
+          unsuccessFeeDeducted: unsuccessFee
+        });
+      }
+    }
+
+    // Worker Penalty & strikes:
     if (worker) {
+      const workerNewBal = Math.max(0, +((worker.balance || 0) - unsuccessFee).toFixed(2));
       const newFailures = (worker.consecutive_failures || 0) + 1;
       let newTimeout = null;
       let isBanned = false;
@@ -522,6 +544,7 @@ router.post('/:id/confirm', (req, res) => {
       }
 
       db.updateUser(worker.id, {
+        balance: workerNewBal,
         consecutive_failures: newFailures,
         timeout_until: newTimeout,
         is_banned: isBanned
@@ -540,8 +563,9 @@ router.post('/:id/confirm', (req, res) => {
       }
 
       return res.json({
-        message: 'Order marked as Trial Not Activated.',
+        message: 'Order marked as Failed / Unsuccessful ($0.05 unsuccess fee deducted).',
         order: updatedOrder,
+        unsuccessFee,
         workerPenalty: penaltyMessage
       });
     }
@@ -550,8 +574,9 @@ router.post('/:id/confirm', (req, res) => {
     if (io) io.emit('orders_refresh');
 
     return res.json({
-      message: 'Order marked as Trial Not Activated.',
-      order: updatedOrder
+      message: 'Order marked as Failed / Unsuccessful ($0.05 unsuccess fee deducted).',
+      order: updatedOrder,
+      unsuccessFee
     });
   }
 });
@@ -698,14 +723,41 @@ router.post('/:id/manual-verify', (req, res) => {
 
   } else {
     // --- MANUAL FAILED / TRIAL NOT ACTIVATED ---
+    const unsuccessFee = 0.05;
     const updatedOrder = db.updateOrder(orderId, {
       status: 'trial_not_activated',
       confirmed_at: now,
       is_manually_verified: true,
       manually_verified_by: publisher.name,
       manually_verified_at: now,
-      manual_verification_notes: notes || 'Manually marked as Failed / Trial Not Activated by Agent'
+      manual_verification_notes: notes || 'Manually marked as Failed / Trial Not Activated by Agent',
+      unsuccess_fee: unsuccessFee
     });
+
+    // Deduct $0.05 unsuccess fee from Publisher
+    // User Requirement: "deduct there 0.05 if its unsuccess"
+    if (publisher) {
+      const newBal = Math.max(0, +((publisher.balance || 0) - unsuccessFee).toFixed(2));
+      const newSpent = +((publisher.total_spent || 0) + unsuccessFee).toFixed(2);
+      db.updateUser(publisher.id, {
+        balance: newBal,
+        total_spent: newSpent
+      });
+
+      const io = getIO();
+      if (io) {
+        io.emit('publisher_balance_updated', {
+          publisherId: publisher.id,
+          balance: newBal,
+          unsuccessFeeDeducted: unsuccessFee
+        });
+      }
+    }
+
+    if (worker) {
+      const workerNewBal = Math.max(0, +((worker.balance || 0) - unsuccessFee).toFixed(2));
+      db.updateUser(worker.id, { balance: workerNewBal });
+    }
 
     const io = getIO();
     if (io) {
@@ -718,8 +770,9 @@ router.post('/:id/manual-verify', (req, res) => {
     }
 
     return res.json({
-      message: 'Order manually marked as Trial Not Activated by Agent.',
-      order: updatedOrder
+      message: 'Order manually marked as Failed / Trial Not Activated by Agent ($0.05 unsuccess fee deducted).',
+      order: updatedOrder,
+      unsuccessFee
     });
   }
 });
@@ -795,11 +848,30 @@ router.post('/:id/undo-verify', (req, res) => {
     }
   }
 
-  // 2. If previous status was 'trial_not_activated', rollback worker strikes
+  // 2. If previous status was 'trial_not_activated', rollback worker strikes and refund $0.05
   if (previousStatus === 'trial_not_activated') {
-    if (worker && worker.consecutive_failures > 0) {
+    if (orderPublisher) {
+      const restoredBal = +((orderPublisher.balance || 0) + 0.05).toFixed(2);
+      const newSpent = Math.max(0, +((orderPublisher.total_spent || 0) - 0.05).toFixed(2));
+      db.updateUser(orderPublisher.id, {
+        balance: restoredBal,
+        total_spent: newSpent
+      });
+      const io = getIO();
+      if (io) {
+        io.emit('publisher_balance_updated', {
+          publisherId: orderPublisher.id,
+          balance: restoredBal
+        });
+      }
+    }
+
+    if (worker) {
+      const strikes = Math.max(0, (worker.consecutive_failures || 0) - 1);
+      const restoredWorkerBal = +((worker.balance || 0) + 0.05).toFixed(2);
       db.updateUser(worker.id, {
-        consecutive_failures: Math.max(0, worker.consecutive_failures - 1),
+        balance: restoredWorkerBal,
+        consecutive_failures: strikes,
         timeout_until: null,
         is_banned: false
       });

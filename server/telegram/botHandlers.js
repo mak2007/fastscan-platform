@@ -1552,13 +1552,40 @@ export class TelegramBotService {
         }
       );
     } else {
-      // Reject
+      // Reject / Unsuccess
+      const unsuccessFee = 0.05;
+      if (publisher) {
+        const newBal = Math.max(0, +((publisher.balance || 0) - unsuccessFee).toFixed(2));
+        db.updateUser(publisher.id, {
+          balance: newBal,
+          total_spent: +((publisher.total_spent || 0) + unsuccessFee).toFixed(2)
+        });
+      }
+
+      if (worker) {
+        const workerNewBal = Math.max(0, +((worker.balance || 0) - unsuccessFee).toFixed(2));
+        db.updateUser(worker.id, { balance: workerNewBal });
+      }
+
       db.updateOrder(orderId, {
         status: 'trial_not_activated',
         confirmed_at: now,
         is_manually_verified: true,
-        manually_verified_by: agent ? agent.name : 'Agent via Telegram'
+        manually_verified_by: agent ? agent.name : 'Agent via Telegram',
+        unsuccess_fee: unsuccessFee
       });
+
+      try {
+        const io = getIO();
+        if (io) {
+          io.emit('order_manually_verified', {
+            orderId,
+            status: 'trial_not_activated',
+            verifiedBy: agent ? agent.name : 'Agent via Telegram'
+          });
+          io.emit('orders_refresh');
+        }
+      } catch (e) {}
 
       if (worker && worker.telegram_chat_id) {
         await this.client.sendMessage(
@@ -1567,10 +1594,22 @@ export class TelegramBotService {
         );
       }
 
-      await this.client.answerCallbackQuery(callbackId, 'Marked as Rejected/Failed.');
+      await this.client.answerCallbackQuery(callbackId, 'Marked as Rejected ($0.05 fee deducted).');
       await this.client.sendMessage(
         chatId,
-        `❌ <b>Order ${order.id} Marked as Failed / Not Activated.</b>\nNo scan fee deducted.`
+        `❌ <b>Order ${order.id} Marked as Failed / Unsuccessful.</b>\n` +
+        `━━━━━━━━━━━━━━━━━━\n` +
+        `💸 <b>$0.05 unsuccess fee</b> deducted.\n` +
+        `💳 Remaining Balance: <b>$${(publisher?.balance || 0).toFixed(2)}</b>\n\n` +
+        `<i>Made a mistake? Tap Undo below to revert:</i>`,
+        {
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '↩️ Undo Reject', callback_data: `agent_undo:${order.id}` }]
+            ]
+          }
+        }
       );
     }
   }
@@ -1589,23 +1628,30 @@ export class TelegramBotService {
     const config = db.getConfig();
     const publisher = db.getUser(order.publisher_id);
     const worker = order.claimed_by ? db.getUser(order.claimed_by) : null;
-    const scanFee = order.rate || 0.70;
+    const isPreviousSuccess = order.status === 'success';
+    const feeToRefund = isPreviousSuccess ? (order.rate || 0.70) : 0.05;
     const reward = order.worker_rate || config.worker_payout_per_scan || 0.40;
 
     if (publisher) {
-      const restoredBal = +((publisher.balance || 0) + scanFee).toFixed(2);
+      const restoredBal = +((publisher.balance || 0) + feeToRefund).toFixed(2);
       db.updateUser(publisher.id, {
         balance: restoredBal,
-        total_spent: Math.max(0, +((publisher.total_spent || 0) - scanFee).toFixed(2)),
-        total_scans: Math.max(0, (publisher.total_scans || 0) - 1)
+        total_spent: Math.max(0, +((publisher.total_spent || 0) - feeToRefund).toFixed(2)),
+        total_scans: isPreviousSuccess ? Math.max(0, (publisher.total_scans || 0) - 1) : (publisher.total_scans || 0)
       });
     }
 
     if (worker) {
-      db.updateUser(worker.id, {
-        balance: Math.max(0, +((worker.balance || 0) - reward).toFixed(2)),
-        total_personal_completed: Math.max(0, (worker.total_personal_completed || 0) - 1)
-      });
+      if (isPreviousSuccess) {
+        db.updateUser(worker.id, {
+          balance: Math.max(0, +((worker.balance || 0) - reward).toFixed(2)),
+          total_personal_completed: Math.max(0, (worker.total_personal_completed || 0) - 1)
+        });
+      } else {
+        db.updateUser(worker.id, {
+          balance: +((worker.balance || 0) + 0.05).toFixed(2)
+        });
+      }
     }
 
     db.updateOrder(orderId, {
@@ -1624,7 +1670,7 @@ export class TelegramBotService {
       chatId,
       `↩️ <b>Verification Undone for ${order.id}!</b>\n` +
       `━━━━━━━━━━━━━━━━━━\n` +
-      `💰 <b>$${scanFee.toFixed(2)} refunded</b> to your prepaid balance.\n` +
+      `💰 <b>$${feeToRefund.toFixed(2)} refunded</b> to your prepaid balance.\n` +
       `💳 Current Balance: <b>$${(publisher?.balance || 0).toFixed(2)}</b>\n` +
       `Order status reverted to <i>Awaiting Review</i>.`,
       {
@@ -1632,8 +1678,8 @@ export class TelegramBotService {
         reply_markup: {
           inline_keyboard: [
             [
-              { text: '✅ Re-confirm Success', callback_data: `agent_verify:${order.id}:success` },
-              { text: '❌ Reject (Failed)', callback_data: `agent_verify:${order.id}:failed` }
+              { text: `✅ Re-confirm Success (-$${(order.rate || 0.70).toFixed(2)})`, callback_data: `agent_verify:${order.id}:success` },
+              { text: '❌ Reject / Unsuccess (-$0.05)', callback_data: `agent_verify:${order.id}:failed` }
             ]
           ]
         }
