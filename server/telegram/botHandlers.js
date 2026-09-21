@@ -1632,12 +1632,11 @@ export class TelegramBotService {
     const feeToRefund = isPreviousSuccess ? (order.rate || 0.70) : 0.05;
     const reward = order.worker_rate || config.worker_payout_per_scan || 0.40;
 
-    if (publisher) {
-      const restoredBal = +((publisher.balance || 0) + feeToRefund).toFixed(2);
+    // User Requirement: "no no dont refund agent anything"
+    // Agent prepaid balance is NOT refunded under any circumstances
+    if (publisher && isPreviousSuccess) {
       db.updateUser(publisher.id, {
-        balance: restoredBal,
-        total_spent: Math.max(0, +((publisher.total_spent || 0) - feeToRefund).toFixed(2)),
-        total_scans: isPreviousSuccess ? Math.max(0, (publisher.total_scans || 0) - 1) : (publisher.total_scans || 0)
+        total_scans: Math.max(0, (publisher.total_scans || 0) - 1)
       });
     }
 
@@ -1670,9 +1669,8 @@ export class TelegramBotService {
       chatId,
       `↩️ <b>Verification Undone for ${order.id}!</b>\n` +
       `━━━━━━━━━━━━━━━━━━\n` +
-      `💰 <b>$${feeToRefund.toFixed(2)} refunded</b> to your prepaid balance.\n` +
-      `💳 Current Balance: <b>$${(publisher?.balance || 0).toFixed(2)}</b>\n` +
-      `Order status reverted to <i>Awaiting Review</i>.`,
+      `Order status reverted to <i>Awaiting Review</i>.\n` +
+      `💳 Current Balance: <b>$${(publisher?.balance || 0).toFixed(2)}</b>`,
       {
         parse_mode: 'HTML',
         reply_markup: {

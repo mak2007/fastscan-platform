@@ -848,23 +848,9 @@ router.post('/:id/undo-verify', (req, res) => {
     }
   }
 
-  // 2. If previous status was 'trial_not_activated', rollback worker strikes and refund $0.05
+  // 2. If previous status was 'trial_not_activated', rollback worker strikes
+  // User Requirement: "no no dont refund agent anything" -> Agent balance is NEVER refunded!
   if (previousStatus === 'trial_not_activated') {
-    if (orderPublisher) {
-      const restoredBal = +((orderPublisher.balance || 0) + 0.05).toFixed(2);
-      const newSpent = Math.max(0, +((orderPublisher.total_spent || 0) - 0.05).toFixed(2));
-      db.updateUser(orderPublisher.id, {
-        balance: restoredBal,
-        total_spent: newSpent
-      });
-      const io = getIO();
-      if (io) {
-        io.emit('publisher_balance_updated', {
-          publisherId: orderPublisher.id,
-          balance: restoredBal
-        });
-      }
-    }
 
     if (worker) {
       const strikes = Math.max(0, (worker.consecutive_failures || 0) - 1);
