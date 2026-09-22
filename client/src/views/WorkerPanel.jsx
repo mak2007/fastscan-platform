@@ -97,6 +97,7 @@ export default function WorkerPanel({ workerId = 'worker_alex', presence, soundE
   const [workerData, setWorkerData] = useState(null);
   const [isOnline, setIsOnline] = useState(true);
   const [timeoutRemaining, setTimeoutRemaining] = useState(0);
+  const [urgentWarning, setUrgentWarning] = useState(null);
 
   // Orders
   const [availableOrders, setAvailableOrders] = useState([]);
@@ -420,11 +421,27 @@ export default function WorkerPanel({ workerId = 'worker_alex', presence, soundE
       }
     };
 
+    const handleUserWarned = (warnData) => {
+      if (warnData.userId === workerId) {
+        setUrgentWarning(warnData);
+        if (soundEnabled && soundFX?.playErrorChime) soundFX.playErrorChime();
+        loadWorker();
+      }
+    };
+
+    const handleDailyProgress = (progData) => {
+      if (progData.workerId === workerId) {
+        loadWorker();
+      }
+    };
+
     socket.on('new_order_available', handleNewOrder);
     socket.on('order_claimed', handleOrderClaimed);
     socket.on('order_manually_verified', handleOrderManuallyVerified);
     socket.on('appeal_resolved', handleAppealResolved);
     socket.on('bot_message_received', handleBotMessageReceived);
+    socket.on('user_warned', handleUserWarned);
+    socket.on('worker_daily_progress_updated', handleDailyProgress);
     socket.on('orders_refresh', () => {
       loadOrders();
       loadAppeals();
@@ -437,6 +454,8 @@ export default function WorkerPanel({ workerId = 'worker_alex', presence, soundE
       socket.off('order_manually_verified', handleOrderManuallyVerified);
       socket.off('appeal_resolved', handleAppealResolved);
       socket.off('bot_message_received', handleBotMessageReceived);
+      socket.off('user_warned', handleUserWarned);
+      socket.off('worker_daily_progress_updated', handleDailyProgress);
       socket.off('orders_refresh', loadOrders);
     };
   }, [workerId, soundEnabled, isOnline]);
@@ -820,17 +839,110 @@ export default function WorkerPanel({ workerId = 'worker_alex', presence, soundE
 
           {/* User & Balance Sub-bar */}
           <div className="mt-3 pt-3 border-t border-[#1e2923] flex items-center justify-between text-xs">
-            <span className="text-[#8e9b94] truncate max-w-[180px]">
-              {worker?.name || 'Worker'} • L{worker?.level || 2}
-            </span>
+            <div className="flex items-center gap-2">
+              <span className="text-[#8e9b94] truncate max-w-[180px]">
+                {worker?.name || 'Worker'} • L{worker?.level || 2}
+              </span>
+              {worker?.warnings_count > 0 && (
+                <span className="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[10px] font-bold">
+                  ⚠️ {worker.warnings_count} Warning{worker.warnings_count > 1 ? 's' : ''}
+                </span>
+              )}
+            </div>
             <div className="flex items-center gap-1.5">
               <span className="text-[#8e9b94]">Balance:</span>
               <span className="font-mono font-bold text-[#bbf246] text-sm">
-                ${(worker?.balance || 0).toFixed(2)}
+                {(worker?.balance || 0).toFixed(2)} rs
               </span>
             </div>
           </div>
         </div>
+
+        {/* Daily Milestone & Dynamic Rate Tracker Card */}
+        {(() => {
+          const ds = workerData?.daily_stats;
+          const todayCount = ds?.todayCount || 0;
+          const currentRate = ds?.rate || 25;
+          const currentEmoji = ds?.emoji || '🪙🪙🪙';
+          const nextTier = ds?.nextTier;
+          const scansUntilNext = ds?.scansUntilNextTier || 0;
+          const tiers = ds?.tiers || [
+            { slot: 1, label: '1-5 scans: 25rs 🪙🪙🪙', rate: 25, emoji: '🪙🪙🪙', min: 1, max: 5 },
+            { slot: 2, label: '6-10 scans: 28rs 💸💸💸', rate: 28, emoji: '💸💸💸', min: 6, max: 10 },
+            { slot: 3, label: '11-20 scans: 38rs 💰💰💰', rate: 38, emoji: '💰💰💰', min: 11, max: 20 },
+            { slot: 4, label: '20+ scans: 40rs 🪎🪎🪎', rate: 40, emoji: '🪎🪎🪎', min: 21, max: 40 },
+            { slot: 5, label: '40+ scans: 42rs 🧸🧸🧸', rate: 42, emoji: '🧸🧸🧸', min: 41, max: 999999 }
+          ];
+
+          return (
+            <div className="bg-gradient-to-br from-[#152e2a] via-[#121915] to-[#18241e] border border-[#2dd4bf]/40 rounded-2xl p-4 shadow-lg space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
+                  <span className="text-2xl">{currentEmoji}</span>
+                  <div>
+                    <h3 className="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5">
+                      <span>Daily Milestone Rate</span>
+                      <span className="px-2 py-0.5 rounded-full bg-[#bbf246] text-black font-extrabold text-[10px]">
+                        {currentRate} rs / scan
+                      </span>
+                    </h3>
+                    <p className="text-[11px] text-[#2dd4bf] font-medium">
+                      Today: <strong>{todayCount}</strong> completed scans
+                    </p>
+                  </div>
+                </div>
+
+                {nextTier ? (
+                  <div className="text-right">
+                    <span className="text-[10px] text-[#8e9b94] block uppercase font-semibold">Next Unlock</span>
+                    <span className="text-xs font-bold text-amber-300">
+                      {scansUntilNext} more for {nextTier.rate}rs {nextTier.emoji}
+                    </span>
+                  </div>
+                ) : (
+                  <span className="px-2 py-0.5 rounded bg-purple-500/20 text-purple-300 border border-purple-500/40 text-[10px] font-bold uppercase">
+                    Max Tier 🧸
+                  </span>
+                )}
+              </div>
+
+              {/* Progress bar to next slot */}
+              {nextTier && (
+                <div className="w-full h-2 rounded-full bg-slate-800/80 overflow-hidden">
+                  <div 
+                    className="h-full bg-gradient-to-r from-[#2dd4bf] to-[#bbf246] rounded-full transition-all duration-500"
+                    style={{ 
+                      width: `${Math.min(100, Math.max(8, ((todayCount % 10) / 10) * 100))}%` 
+                    }}
+                  />
+                </div>
+              )}
+
+              {/* 5 Milestone Slots Ladder */}
+              <div className="grid grid-cols-5 gap-1.5 pt-1">
+                {tiers.map((t) => {
+                  const isActive = (todayCount >= t.min && (todayCount <= t.max || t.max >= 999999)) || (todayCount === 0 && t.slot === 1);
+                  return (
+                    <div
+                      key={t.slot}
+                      className={`rounded-xl p-1.5 text-center border transition-all ${
+                        isActive
+                          ? 'bg-[#2dd4bf]/20 border-[#2dd4bf] text-white shadow-md shadow-[#2dd4bf]/20 scale-105'
+                          : 'bg-[#151c19] border-[#1e2923] text-slate-400 opacity-60'
+                      }`}
+                    >
+                      <div className="text-xs">{t.emoji}</div>
+                      <div className="text-[11px] font-bold text-white">{t.rate}rs</div>
+                      <div className="text-[8px] text-[#8e9b94] truncate">
+                        {t.slot === 1 ? '1-5' : t.slot === 2 ? '6-10' : t.slot === 3 ? '11-20' : t.slot === 4 ? '20+' : '40+'}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })()}
 
         {/* Penalties / Timeout alert if active */}
         {timeoutRemaining > 0 && (
@@ -2167,6 +2279,49 @@ export default function WorkerPanel({ workerId = 'worker_alex', presence, soundE
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Urgent Official Boss Warning Modal */}
+      {urgentWarning && (
+        <div className="fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex items-center justify-center p-4 animate-fadeIn">
+          <div className="bg-gradient-to-b from-[#2a1318] to-[#121915] border-2 border-rose-500 rounded-3xl max-w-sm w-full p-6 text-center space-y-4 shadow-2xl shadow-rose-950/80">
+            <div className="w-14 h-14 rounded-2xl bg-rose-500/20 text-rose-400 border border-rose-500/40 flex items-center justify-center mx-auto text-3xl animate-pulse">
+              ⚠️
+            </div>
+            <div>
+              <span className="text-[10px] uppercase font-mono tracking-widest text-rose-400 font-bold block">
+                Official Alert
+              </span>
+              <h3 className="text-base font-black text-white">
+                Warning from Super Boss
+              </h3>
+            </div>
+
+            <div className="bg-black/60 border border-rose-500/30 rounded-2xl p-4 text-xs text-left space-y-2">
+              <span className="text-[10px] uppercase font-bold text-rose-400 block tracking-wider">
+                Warning Reason
+              </span>
+              <p className="text-slate-100 italic leading-relaxed">
+                "{urgentWarning.reason}"
+              </p>
+              <div className="pt-2 border-t border-rose-500/20 flex items-center justify-between text-[11px] text-slate-400">
+                <span>Account Warnings:</span>
+                <strong className="text-rose-300 font-mono">{urgentWarning.warningsCount} Recorded</strong>
+              </div>
+            </div>
+
+            <p className="text-[11px] text-slate-400 leading-tight">
+              Please strictly follow task guidelines. Repeated violations will result in automated timeout or permanent ban.
+            </p>
+
+            <button
+              onClick={() => setUrgentWarning(null)}
+              className="w-full py-3 rounded-2xl bg-gradient-to-r from-rose-600 to-amber-600 hover:from-rose-500 hover:to-amber-500 text-white font-black text-xs uppercase tracking-wider shadow-lg shadow-rose-600/30 transition-all active:scale-95"
+            >
+              I Understand & Acknowledge
+            </button>
           </div>
         </div>
       )}

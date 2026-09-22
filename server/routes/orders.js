@@ -422,10 +422,21 @@ router.post('/:id/confirm', (req, res) => {
   const publisher = db.getUser(order.publisher_id);
 
   if (action === 'confirm_success') {
+    // 0. Compute worker reward & dynamic daily tier BEFORE marking order success
+    const nextScanTier = worker ? db.getRewardForNextScan(worker.id) : null;
+    const reward = nextScanTier ? nextScanTier.rate : (order.worker_rate !== undefined ? order.worker_rate : 25);
+    const tierSlot = nextScanTier ? nextScanTier.tier.slot : 1;
+    const tierEmoji = nextScanTier ? nextScanTier.emoji : '🪙🪙🪙';
+    const tierUnit = nextScanTier ? nextScanTier.unit : 'rs';
+
     // --- SUCCESS PATH ---
-    const updatedOrder = db.updateOrder(orderId, {
+    let updatedOrder = db.updateOrder(orderId, {
       status: 'success',
-      confirmed_at: now
+      confirmed_at: now,
+      worker_reward: reward,
+      worker_tier_slot: tierSlot,
+      worker_tier_emoji: tierEmoji,
+      worker_tier_unit: tierUnit
     });
 
     // 1. Update Publisher metrics & deduct scan fee from prepaid balance
@@ -458,10 +469,9 @@ router.post('/:id/confirm', (req, res) => {
       // Success resets consecutive failures counter!
       const personalDone = (worker.total_personal_completed || 0) + 1;
 
-      // Handle payout / team rollup
-      // "if the 1st in the pyramid is the considered boss and 2nd 3rd doesnt gets payment option every order is success under subworker also show overall done by main worker"
+      // Handle payout / team rollup with Dynamic Daily Tiered Rate Mechanism
+      // 1-5: 25rs 🪙🪙🪙, 6-10: 28rs 💸💸💸, 11-20: 38rs 💰💰💰, 20+: 40rs 🪎🪎🪎, 40+: 42rs 🧸🧸🧸
       const mainWorker = findMainWorker(worker.id);
-      const reward = order.worker_rate !== undefined ? order.worker_rate : (config.worker_payout_per_scan || 0.40);
       const workerNewBal = +(worker.balance || 0) + reward;
 
       if (mainWorker && mainWorker.id !== worker.id) {
@@ -482,6 +492,18 @@ router.post('/:id/confirm', (req, res) => {
           consecutive_failures: 0,
           timeout_until: null,
           total_personal_completed: personalDone,
+          balance: +workerNewBal.toFixed(2)
+        });
+      }
+
+      const ioProgress = getIO();
+      if (ioProgress) {
+        ioProgress.emit('worker_daily_progress_updated', {
+          workerId: worker.id,
+          dailyCompleted: nextScanTier.nextCount,
+          rewardEarned: reward,
+          emoji: nextScanTier.emoji,
+          activeTier: nextScanTier.tier,
           balance: +workerNewBal.toFixed(2)
         });
       }
@@ -641,14 +663,25 @@ router.post('/:id/manual-verify', (req, res) => {
   const orderPublisher = db.getUser(order.publisher_id);
 
   if (action === 'confirm_success') {
+    // 0. Compute worker reward & dynamic daily tier BEFORE marking order success
+    const nextScanTier = worker ? db.getRewardForNextScan(worker.id) : null;
+    const reward = nextScanTier ? nextScanTier.rate : (order.worker_rate !== undefined ? order.worker_rate : 25);
+    const tierSlot = nextScanTier ? nextScanTier.tier.slot : 1;
+    const tierEmoji = nextScanTier ? nextScanTier.emoji : '🪙🪙🪙';
+    const tierUnit = nextScanTier ? nextScanTier.unit : 'rs';
+
     // --- MANUAL SUCCESS ---
-    const updatedOrder = db.updateOrder(orderId, {
+    let updatedOrder = db.updateOrder(orderId, {
       status: 'success',
       confirmed_at: now,
       is_manually_verified: true,
       manually_verified_by: publisher.name,
       manually_verified_at: now,
-      manual_verification_notes: notes || 'Manually verified as Success by Agent'
+      manual_verification_notes: notes || 'Manually verified as Success by Agent',
+      worker_reward: reward,
+      worker_tier_slot: tierSlot,
+      worker_tier_emoji: tierEmoji,
+      worker_tier_unit: tierUnit
     });
 
     // 1. Update Publisher metrics & deduct scan fee from prepaid balance
@@ -676,11 +709,11 @@ router.post('/:id/manual-verify', (req, res) => {
       }
     }
 
-    // 2. Update Worker metrics (credited without strikes)
+    // 2. Update Worker metrics (credited with Dynamic Daily Tiered Rate)
+    // 1-5: 25rs 🪙🪙🪙, 6-10: 28rs 💸💸💸, 11-20: 38rs 💰💰💰, 20+: 40rs 🪎🪎🪎, 40+: 42rs 🧸🧸🧸
     if (worker) {
       const personalDone = (worker.total_personal_completed || 0) + 1;
       const mainWorker = findMainWorker(worker.id);
-      const reward = order.worker_rate !== undefined ? order.worker_rate : (config.worker_payout_per_scan || 0.40);
       const workerNewBal = +(worker.balance || 0) + reward;
 
       if (mainWorker && mainWorker.id !== worker.id) {
@@ -701,6 +734,18 @@ router.post('/:id/manual-verify', (req, res) => {
           consecutive_failures: 0,
           timeout_until: null,
           total_personal_completed: personalDone,
+          balance: +workerNewBal.toFixed(2)
+        });
+      }
+
+      const ioProgress = getIO();
+      if (ioProgress) {
+        ioProgress.emit('worker_daily_progress_updated', {
+          workerId: worker.id,
+          dailyCompleted: nextScanTier.nextCount,
+          rewardEarned: reward,
+          emoji: nextScanTier.emoji,
+          activeTier: nextScanTier.tier,
           balance: +workerNewBal.toFixed(2)
         });
       }

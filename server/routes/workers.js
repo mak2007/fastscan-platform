@@ -52,8 +52,11 @@ router.get('/:id', (req, res) => {
   // Compute team completed stats
   const mainWorker = findMainWorker(worker.id);
 
+  const dailyStats = db.getWorkerDailyStats(worker.id);
+
   res.json({
     worker,
+    daily_stats: dailyStats,
     isLevel1: worker.level === 1,
     parent: worker.parent_id ? db.getUser(worker.parent_id) : null,
     subworkers: totalSubworkers,

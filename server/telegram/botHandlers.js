@@ -133,6 +133,83 @@ export class TelegramBotService {
       return;
     }
 
+    // Command: /warn <user> <reason>
+    // User Requirement: "allow me to warn the users directly"
+    if (text.startsWith('/warn')) {
+      const parts = text.split(' ');
+      const targetQuery = parts[1];
+      const reason = parts.slice(2).join(' ') || 'Warning issued by Super Boss';
+
+      if (!targetQuery) {
+        await this.client.sendMessage(
+          chatId,
+          `⚠️ <b>Usage:</b> <code>/warn &lt;username_or_id&gt; &lt;reason&gt;</code>\n\n` +
+          `<i>Example:</i> <code>/warn Karan Invalid or fake payment proof submitted</code>`,
+          { parse_mode: 'HTML' }
+        );
+        return;
+      }
+
+      const allUsers = db.getUsers();
+      const targetUser = allUsers.find(u => 
+        u.id.toLowerCase() === targetQuery.toLowerCase() ||
+        u.name.toLowerCase().includes(targetQuery.toLowerCase()) ||
+        String(u.telegram_chat_id) === targetQuery
+      );
+
+      if (!targetUser) {
+        await this.client.sendMessage(chatId, `❌ User matching "<code>${targetQuery}</code>" not found.`);
+        return;
+      }
+
+      const warningResult = db.addWarningToUser(targetUser.id, {
+        reason,
+        warned_by: linkedUser ? linkedUser.name : 'Super Boss (Telegram)'
+      });
+
+      let deliveredTelegram = false;
+      if (targetUser.telegram_chat_id) {
+        try {
+          await this.client.sendMessage(
+            targetUser.telegram_chat_id,
+            `🚨 <b>OFFICIAL BOSS WARNING</b> 🚨\n` +
+            `━━━━━━━━━━━━━━━━━━\n` +
+            `👤 <b>To:</b> ${targetUser.name}\n` +
+            `⚠️ <b>Warning Reason:</b>\n<i>${reason}</i>\n` +
+            `━━━━━━━━━━━━━━━━━━\n` +
+            `📊 <b>Total Warnings on Account:</b> ${warningResult.user.warnings_count}\n\n` +
+            `⚠️ <i>Notice: Please adhere strictly to platform scanning rules. Continued violations will result in automated timeouts or account ban.</i>`,
+            { parse_mode: 'HTML' }
+          );
+          deliveredTelegram = true;
+        } catch (e) {}
+      }
+
+      try {
+        const io = getIO();
+        if (io) {
+          io.emit('user_warned', {
+            userId: targetUser.id,
+            userName: targetUser.name,
+            reason,
+            warningsCount: warningResult.user.warnings_count
+          });
+          io.emit('users_updated');
+        }
+      } catch (e) {}
+
+      await this.client.sendMessage(
+        chatId,
+        `✅ <b>Warning Issued to ${targetUser.name}!</b>\n` +
+        `━━━━━━━━━━━━━━━━━━\n` +
+        `⚠️ <b>Reason:</b> ${reason}\n` +
+        `📊 <b>Total Warnings on Account:</b> ${warningResult.user.warnings_count}\n` +
+        `📨 <b>Telegram Delivered:</b> ${deliveredTelegram ? 'Yes ⚡' : 'No (user not linked to Telegram bot)'}`,
+        { parse_mode: 'HTML' }
+      );
+      return;
+    }
+
     // If message looks like a Joining Key
     if (text.startsWith('KEY-') || text.startsWith('L1-') || text.startsWith('L2-') || text.startsWith('SUB-')) {
       await this.linkUserByKey(chatId, text);
@@ -1041,16 +1118,32 @@ export class TelegramBotService {
    */
   async sendStats(chatId, user) {
     const metrics = priorityQueue.calculateWorkerMetrics(user.id);
+    const dailyStats = db.getWorkerDailyStats(user.id);
+
+    const ladderText = (dailyStats.tiers || []).map(t => {
+      const isCurrent = t.slot === dailyStats.currentTier.slot;
+      return `${isCurrent ? '👉 ' : '• '}<b>${t.label}</b>${isCurrent ? ' <i>(ACTIVE)</i>' : ''}`;
+    }).join('\n');
+
     await this.client.sendMessage(
       chatId,
       `📊 <b>YOUR STATS & PERFORMANCE</b>\n` +
       `━━━━━━━━━━━━━━━━━━\n` +
-      `💰 <b>Current Balance:</b> $${(user.balance || 0).toFixed(2)}\n` +
-      `✅ <b>Successful Scans:</b> ${metrics.successfulCount}\n` +
-      `❌ <b>Failed / Expired:</b> ${metrics.failedCount}\n` +
+      `💰 <b>Current Balance:</b> ${(user.balance || 0).toFixed(2)} rs\n` +
+      `🎯 <b>Today's Scans:</b> <b>${dailyStats.todayCount}</b> completed\n` +
+      `⚡ <b>Active Scan Rate:</b> <b>${dailyStats.rate}rs ${dailyStats.emoji}</b>\n` +
+      (dailyStats.nextTier 
+        ? `🚀 <i>${dailyStats.scansUntilNextTier} more scan(s) to unlock <b>${dailyStats.nextTier.rate}rs ${dailyStats.nextTier.emoji}</b>!</i>\n`
+        : `🏆 <i>Top Milestone Tier Active! 🧸🧸🧸</i>\n`) +
+      `━━━━━━━━━━━━━━━━━━\n` +
+      `📈 <b>Daily Milestone Ladder:</b>\n` +
+      `${ladderText}\n` +
+      `━━━━━━━━━━━━━━━━━━\n` +
+      `✅ <b>Lifetime Success:</b> ${metrics.successfulCount}\n` +
       `📈 <b>Success Rate:</b> <b>${metrics.successRate}%</b>\n` +
-      `🎖️ <b>Queue Status:</b> ${metrics.isPriorityEligible ? '⭐ Priority Queue (Top Ranking)' : `Beginner Queue (${metrics.totalScans}/5 Scans)`}\n` +
-      `⚡ <b>Strike Meter:</b> ${metrics.consecutiveFailures} / 6 strikes\n` +
+      `🎖️ <b>Queue Status:</b> ${metrics.isPriorityEligible ? '⭐ Priority Radar' : 'Beginner Radar'}\n` +
+      `⚡ <b>Strikes:</b> ${metrics.consecutiveFailures} / 6 strikes\n` +
+      (user.warnings_count ? `⚠️ <b>Warnings:</b> <b>${user.warnings_count}</b> on account\n` : '') +
       `━━━━━━━━━━━━━━━━━━`,
       {
         parse_mode: 'HTML',
@@ -1491,7 +1584,9 @@ export class TelegramBotService {
     const publisher = db.getUser(order.publisher_id);
     const worker = order.claimed_by ? db.getUser(order.claimed_by) : null;
     const scanFee = order.rate || 0.70;
-    const reward = order.worker_rate || config.worker_payout_per_scan || 0.40;
+    const nextScanTier = worker ? db.getRewardForNextScan(worker.id) : null;
+    const reward = nextScanTier ? nextScanTier.rate : (order.worker_rate || (config.worker_payout_per_scan || 25.00));
+    const tierEmoji = nextScanTier ? nextScanTier.emoji : '🪙🪙🪙';
 
     if (result === 'success') {
       if (publisher) {
@@ -1504,16 +1599,24 @@ export class TelegramBotService {
       }
 
       if (worker) {
+        const newWorkerBal = +((worker.balance || 0) + reward).toFixed(2);
         db.updateUser(worker.id, {
-          balance: +((worker.balance || 0) + reward).toFixed(2),
+          balance: newWorkerBal,
           total_personal_completed: (worker.total_personal_completed || 0) + 1,
           consecutive_failures: 0
         });
 
         if (worker.telegram_chat_id) {
+          const stats = db.getWorkerDailyStats(worker.id);
           await this.client.sendMessage(
             worker.telegram_chat_id,
-            `🎉 <b>Payment Verified by Agent!</b>\nOrder <code>${order.id}</code> confirmed.\n<b>+$${reward.toFixed(2)}</b> credited to your balance!`
+            `🎉 <b>Payment Verified by Agent!</b>\n` +
+            `━━━━━━━━━━━━━━━━━━\n` +
+            `Order <code>${order.id}</code> confirmed.\n` +
+            `💰 <b>+${reward}rs ${tierEmoji}</b> credited to your balance!\n` +
+            `🎯 <b>Today's Scans:</b> ${stats.todayCount} completed | Active Tier: <b>${stats.rate}rs ${stats.emoji}</b>\n` +
+            `💳 <b>Wallet Balance:</b> ${newWorkerBal.toFixed(2)} rs`,
+            { parse_mode: 'HTML' }
           );
         }
       }
@@ -1522,7 +1625,9 @@ export class TelegramBotService {
         status: 'success',
         confirmed_at: now,
         manually_verified_by: agent ? agent.name : 'Agent via Telegram',
-        is_manually_verified: true
+        is_manually_verified: true,
+        worker_reward: reward,
+        worker_tier_emoji: tierEmoji
       });
 
       try {

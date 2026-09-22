@@ -21,6 +21,14 @@ export function generateMerchantReference(name = 'RobertHooper') {
   return `${region}-${num}-${cleanName}${randTag}_outlook.com-${randHash}`;
 }
 
+export const DEFAULT_WORKER_DAILY_TIERS = [
+  { slot: 1, min: 1, max: 5, rate: 25, unit: 'rs', emoji: '🪙🪙🪙', label: '1-5 scans: 25rs 🪙🪙🪙', title: 'Starter Fleet' },
+  { slot: 2, min: 6, max: 10, rate: 28, unit: 'rs', emoji: '💸💸💸', label: '6-10 scans: 28rs 💸💸💸', title: 'Bronze Hustler' },
+  { slot: 3, min: 11, max: 20, rate: 38, unit: 'rs', emoji: '💰💰💰', label: '11-20 scans: 38rs 💰💰💰', title: 'Silver Earner' },
+  { slot: 4, min: 21, max: 40, rate: 40, unit: 'rs', emoji: '🪎🪎🪎', label: '20+ scans: 40rs 🪎🪎🪎', title: 'Gold Pro Scanner' },
+  { slot: 5, min: 41, max: 999999, rate: 42, unit: 'rs', emoji: '🧸🧸🧸', label: '40+ scans: 42rs 🧸🧸🧸', title: 'Diamond Boss Fleet' }
+];
+
 const DEFAULT_DB = {
   config: {
     scan_lock_limit: 3, // Block publisher after 3 successful scans until Boss unlocks
@@ -28,7 +36,8 @@ const DEFAULT_DB = {
     promo_scan_rate: 0.55,
     regular_scan_rate: 0.60,
     default_timer_seconds: 300, // 5 minutes
-    worker_payout_per_scan: 0.40,
+    worker_payout_per_scan: 25.00, // Default base rate in RS
+    worker_daily_rate_tiers: DEFAULT_WORKER_DAILY_TIERS,
     boss_upi_id: "boss@okaxis",
     boss_binance_id: "987654321"
   },
@@ -438,6 +447,92 @@ class Database {
 
   markMessageRead(id) {
     return this.updateMessage(id, { is_read: true, read_at: new Date().toISOString() });
+  }
+
+  /**
+   * Get worker daily stats and active tier based on scans completed today
+   */
+  getWorkerDailyStats(workerId) {
+    const config = this.getConfig();
+    const tiers = config.worker_daily_rate_tiers || DEFAULT_WORKER_DAILY_TIERS;
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const orders = this.getOrders();
+
+    const todayOrders = orders.filter(o => {
+      if (o.claimed_by !== workerId) return false;
+      if (o.status !== 'success') return false;
+      const orderDate = (o.confirmed_at || o.created_at || '').slice(0, 10);
+      return orderDate === todayStr;
+    });
+
+    const todayCount = todayOrders.length;
+    // Current tier based on completed count today (or slot 1 if 0)
+    const effectiveCount = Math.max(1, todayCount);
+    const currentTier = tiers.find(t => effectiveCount >= t.min && effectiveCount <= t.max) || tiers[tiers.length - 1];
+
+    const currentTierIdx = tiers.findIndex(t => t.slot === currentTier.slot);
+    const nextTier = currentTierIdx < tiers.length - 1 ? tiers[currentTierIdx + 1] : null;
+    const scansUntilNextTier = nextTier ? Math.max(0, nextTier.min - todayCount) : 0;
+
+    return {
+      workerId,
+      todayCount,
+      todayDate: todayStr,
+      currentTier,
+      nextTier,
+      scansUntilNextTier,
+      rate: currentTier.rate,
+      emoji: currentTier.emoji,
+      unit: currentTier.unit || 'rs',
+      label: currentTier.label,
+      tiers
+    };
+  }
+
+  /**
+   * Calculate reward for the next scan that the worker completes
+   */
+  getRewardForNextScan(workerId) {
+    const stats = this.getWorkerDailyStats(workerId);
+    const nextCount = stats.todayCount + 1;
+    const config = this.getConfig();
+    const tiers = config.worker_daily_rate_tiers || DEFAULT_WORKER_DAILY_TIERS;
+    const targetTier = tiers.find(t => nextCount >= t.min && nextCount <= t.max) || tiers[tiers.length - 1];
+
+    return {
+      nextCount,
+      rate: targetTier.rate,
+      emoji: targetTier.emoji,
+      unit: targetTier.unit || 'rs',
+      tier: targetTier
+    };
+  }
+
+  /**
+   * Add warning to a user (worker or agent)
+   */
+  addWarningToUser(userId, { reason, warned_by = 'Super Boss (Admin)' }) {
+    const user = this.getUser(userId);
+    if (!user) return null;
+
+    const warningItem = {
+      id: 'warn_' + Math.random().toString(36).substring(2, 9),
+      reason: reason || 'Violation of platform policies',
+      warned_by,
+      timestamp: new Date().toISOString()
+    };
+
+    const history = user.warnings_history ? [...user.warnings_history] : [];
+    history.unshift(warningItem);
+    const count = (user.warnings_count || 0) + 1;
+
+    const updated = this.updateUser(userId, {
+      warnings_count: count,
+      warnings_history: history,
+      last_warned_at: warningItem.timestamp
+    });
+
+    return { warning: warningItem, user: updated };
   }
 }
 

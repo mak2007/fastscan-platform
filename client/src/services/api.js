@@ -309,6 +309,17 @@ export const api = {
     return json;
   },
 
+  async warnUser({ userId, reason, deliverTelegram = true }) {
+    const res = await fetch(`${BASE_URL}/admin/warn-user`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_id: userId, reason, deliver_telegram: deliverTelegram })
+    });
+    const json = await res.json();
+    if (!res.ok) throw new Error(json.error || 'Failed to warn user');
+    return json;
+  },
+
   async generateBossKey(label = '') {
     const res = await fetch(`${BASE_URL}/admin/generate-boss-key`, {
       method: 'POST',

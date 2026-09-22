@@ -1,6 +1,7 @@
 import express from 'express';
 import { db } from '../db.js';
 import { getIO, getPresenceStats } from '../sockets/socketHandler.js';
+import { telegramBotService } from '../telegram/botHandlers.js';
 
 const router = express.Router();
 
@@ -62,7 +63,8 @@ router.post('/config', (req, res) => {
     default_timer_seconds,
     worker_payout_per_scan,
     boss_upi_id,
-    boss_binance_id
+    boss_binance_id,
+    worker_daily_rate_tiers
   } = req.body;
 
   const updates = {};
@@ -74,6 +76,9 @@ router.post('/config', (req, res) => {
   if (worker_payout_per_scan !== undefined) updates.worker_payout_per_scan = parseFloat(worker_payout_per_scan);
   if (boss_upi_id !== undefined) updates.boss_upi_id = boss_upi_id.trim();
   if (boss_binance_id !== undefined) updates.boss_binance_id = boss_binance_id.trim();
+  if (worker_daily_rate_tiers !== undefined && Array.isArray(worker_daily_rate_tiers)) {
+    updates.worker_daily_rate_tiers = worker_daily_rate_tiers;
+  }
 
   const updatedConfig = db.updateConfig(updates);
 
@@ -224,6 +229,69 @@ router.get('/boss-keys', (req, res) => {
   const allKeys = db.getKeys();
   const bossKeys = allKeys.filter(k => k.type === 'l1_boss' || k.key.startsWith('L1-BOSS-'));
   res.json({ keys: bossKeys });
+});
+
+// Warn user directly (Super Boss to worker or agent)
+// User Requirement: "and allow me to warn the users directly"
+router.post('/warn-user', async (req, res) => {
+  const { user_id, reason, deliver_telegram = true } = req.body;
+
+  if (!user_id || !reason) {
+    return res.status(400).json({ error: 'User ID and warning reason are required.' });
+  }
+
+  const user = db.getUser(user_id);
+  if (!user) {
+    return res.status(404).json({ error: 'User not found.' });
+  }
+
+  const result = db.addWarningToUser(user_id, {
+    reason: reason.trim(),
+    warned_by: 'Super Boss (Admin)'
+  });
+
+  const updatedUser = result.user;
+  const warning = result.warning;
+  let telegramSent = false;
+
+  // Deliver directly via Telegram if user has linked Telegram and deliver_telegram is true
+  if (deliver_telegram && user.telegram_chat_id && telegramBotService && telegramBotService.client) {
+    try {
+      await telegramBotService.client.sendMessage(
+        user.telegram_chat_id,
+        `🚨 <b>OFFICIAL BOSS WARNING</b> 🚨\n` +
+        `━━━━━━━━━━━━━━━━━━\n` +
+        `👤 <b>To:</b> ${user.name}\n` +
+        `⚠️ <b>Warning Reason:</b>\n<i>${reason.trim()}</i>\n` +
+        `━━━━━━━━━━━━━━━━━━\n` +
+        `📊 <b>Total Warnings on Account:</b> ${updatedUser.warnings_count}\n\n` +
+        `⚠️ <i>Notice: Please adhere strictly to platform scanning rules. Continued violations will result in automated timeouts or account ban.</i>`,
+        { parse_mode: 'HTML' }
+      );
+      telegramSent = true;
+    } catch (err) {
+      console.error('Failed to dispatch direct telegram warning:', err);
+    }
+  }
+
+  const io = getIO();
+  if (io) {
+    io.emit('user_warned', {
+      userId: user.id,
+      userName: user.name,
+      reason: reason.trim(),
+      warningsCount: updatedUser.warnings_count,
+      warning
+    });
+    io.emit('users_updated');
+  }
+
+  res.json({
+    message: `Official warning issued to ${user.name}!`,
+    warning,
+    user: updatedUser,
+    telegram_delivered: telegramSent
+  });
 });
 
 export default router;

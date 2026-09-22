@@ -57,7 +57,13 @@ export default function BossPanel({ soundEnabled }) {
   const [telegramStatus, setTelegramStatus] = useState(null);
   const [telegramToken, setTelegramToken] = useState('');
   const [telegramMinScans, setTelegramMinScans] = useState(5);
-  const [telegramDuration, setTelegramDuration] = useState(300);
+  // Direct User Warning Modal State
+  const [warnModalUser, setWarnModalUser] = useState(null);
+  const [warnReason, setWarnReason] = useState('');
+  const [warnDeliverTelegram, setWarnDeliverTelegram] = useState(true);
+  const [isSubmittingWarning, setIsSubmittingWarning] = useState(false);
+  const [warningSuccessToast, setWarningSuccessToast] = useState(null);
+
   const [isSavingTelegram, setIsSavingTelegram] = useState(false);
 
   const loadTelegramStatus = async () => {
@@ -226,6 +232,27 @@ export default function BossPanel({ soundEnabled }) {
       o.id?.toLowerCase().includes(linkSearch.toLowerCase());
     return matchesFilter && matchesSearch;
   });
+
+  const handleSendWarning = async () => {
+    if (!warnModalUser || !warnReason.trim()) return;
+    try {
+      setIsSubmittingWarning(true);
+      const res = await api.warnUser({
+        userId: warnModalUser.id,
+        reason: warnReason.trim(),
+        deliverTelegram: warnDeliverTelegram
+      });
+      setWarningSuccessToast(res.message || `Official warning delivered to ${warnModalUser.name}!`);
+      setTimeout(() => setWarningSuccessToast(null), 4000);
+      setWarnModalUser(null);
+      setWarnReason('');
+      await loadOverview();
+    } catch (err) {
+      alert(err.message || 'Failed to send warning');
+    } finally {
+      setIsSubmittingWarning(false);
+    }
+  };
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-6 space-y-6">
@@ -525,6 +552,11 @@ export default function BossPanel({ soundEnabled }) {
                             Unlock Requested!
                           </span>
                         )}
+                        {pub.warnings_count > 0 && (
+                          <span className="px-2 py-0.5 rounded bg-amber-950/70 text-amber-400 border border-amber-500/40 text-[10px] font-bold">
+                            ⚠️ {pub.warnings_count} Warning{pub.warnings_count > 1 ? 's' : ''}
+                          </span>
+                        )}
                       </div>
 
                       <div className="flex items-center gap-4 text-xs text-slate-400 font-mono">
@@ -542,8 +574,18 @@ export default function BossPanel({ soundEnabled }) {
                       )}
                     </div>
 
-                    {/* Unlock / Reset Button */}
+                    {/* Actions: Warn & Unlock */}
                     <div className="shrink-0 flex items-center gap-2">
+                      <button
+                        onClick={() => {
+                          setWarnModalUser(pub);
+                          setWarnReason('');
+                        }}
+                        className="px-3 py-2 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 text-xs font-bold flex items-center gap-1.5 transition-all"
+                      >
+                        <AlertTriangle className="w-3.5 h-3.5" />
+                        <span>Warn</span>
+                      </button>
                       <button
                         onClick={() => handleUnlockPublisher(pub.id)}
                         className="px-4 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-xs flex items-center gap-1.5 shadow-md shadow-emerald-600/30 transition-all active:scale-95"
@@ -789,6 +831,11 @@ export default function BossPanel({ soundEnabled }) {
                           Good Standing
                         </span>
                       )}
+                      {w.warnings_count > 0 && (
+                        <span className="px-2 py-0.5 rounded bg-amber-950/70 text-amber-400 border border-amber-500/40 text-[10px] font-bold">
+                          ⚠️ {w.warnings_count} Warning{w.warnings_count > 1 ? 's' : ''}
+                        </span>
+                      )}
                     </div>
 
                     <div className="flex items-center gap-3 text-slate-400 font-mono">
@@ -806,8 +853,18 @@ export default function BossPanel({ soundEnabled }) {
                     </div>
                   </div>
 
-                  {/* Reset Strikes button */}
-                  <div className="shrink-0">
+                  {/* Actions: Warn & Reset Strikes */}
+                  <div className="shrink-0 flex items-center gap-2">
+                    <button
+                      onClick={() => {
+                        setWarnModalUser(w);
+                        setWarnReason('');
+                      }}
+                      className="px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 text-xs font-semibold flex items-center gap-1 transition-all"
+                    >
+                      <AlertTriangle className="w-3.5 h-3.5" />
+                      <span>Warn</span>
+                    </button>
                     <button
                       onClick={() => handleResetWorker(w.id)}
                       className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold border border-slate-700 hover:border-slate-600 transition-all"
@@ -963,6 +1020,48 @@ export default function BossPanel({ soundEnabled }) {
                 <span>Save Platform Configurations</span>
               </button>
             </form>
+
+            {/* Worker Daily Milestone Rates Ladder */}
+            <div className="border-t border-slate-800 pt-5 space-y-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                    <span>🎯</span>
+                    <span>Worker Daily Milestone Rate Ladder</span>
+                  </h4>
+                  <p className="text-[11px] text-slate-400">
+                    Each worker's daily completed scan count automatically increases their per-scan payout:
+                  </p>
+                </div>
+                <span className="px-2.5 py-1 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 text-[10px] font-mono font-bold">
+                  Active in Live Engine
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-5 gap-2.5">
+                {[
+                  { slot: '1', range: '1 - 5 scans', rate: '25 rs', emoji: '🪙🪙🪙', bg: 'from-amber-950/40 to-slate-900', border: 'border-amber-500/30' },
+                  { slot: '2', range: '6 - 10 scans', rate: '28 rs', emoji: '💸💸💸', bg: 'from-emerald-950/40 to-slate-900', border: 'border-emerald-500/30' },
+                  { slot: '3', range: '11 - 20 scans', rate: '38 rs', emoji: '💰💰💰', bg: 'from-sky-950/40 to-slate-900', border: 'border-sky-500/30', extra: '+5rs boost' },
+                  { slot: '4', range: '20+ scans', rate: '40 rs', emoji: '🪎🪎🪎', bg: 'from-indigo-950/40 to-slate-900', border: 'border-indigo-500/30', extra: '+5rs boost' },
+                  { slot: '5', range: '40+ scans', rate: '42 rs', emoji: '🧸🧸🧸', bg: 'from-purple-950/40 to-slate-900', border: 'border-purple-500/30', extra: '+5rs boost' }
+                ].map((tier) => (
+                  <div
+                    key={tier.slot}
+                    className={`bg-gradient-to-b ${tier.bg} border ${tier.border} rounded-xl p-3 text-center space-y-1`}
+                  >
+                    <div className="text-base">{tier.emoji}</div>
+                    <div className="text-xs font-bold text-white">{tier.rate}</div>
+                    <div className="text-[10px] text-slate-400">{tier.range}</div>
+                    {tier.extra && (
+                      <span className="inline-block px-1.5 py-0.5 rounded bg-amber-400/20 text-amber-300 text-[9px] font-bold">
+                        {tier.extra}
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
           </div>
         </div>
       )}
@@ -1271,6 +1370,130 @@ export default function BossPanel({ soundEnabled }) {
               </div>
             )}
           </div>
+        </div>
+      )}
+
+      {/* Warn User Modal */}
+      {warnModalUser && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 animate-fadeIn">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-md w-full p-5 space-y-4 shadow-2xl animate-scaleIn">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <div className="p-1.5 rounded-lg bg-amber-500/20 text-amber-400 border border-amber-500/30">
+                  <AlertTriangle className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">Issue Official Boss Warning</h3>
+                  <p className="text-[11px] text-slate-400">Direct alert will be dispatched to this account</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setWarnModalUser(null)}
+                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+              >
+                <XCircle className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Target Details */}
+            <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-1 text-xs font-mono">
+              <div className="flex items-center justify-between">
+                <span className="text-slate-400 font-sans font-medium">Target User:</span>
+                <span className="font-bold text-white font-sans">{warnModalUser.name}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-slate-400 font-sans font-medium">Role:</span>
+                <span className="uppercase text-amber-400 font-bold">{warnModalUser.role}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-slate-400 font-sans font-medium">Telegram Delivery:</span>
+                <span className={warnModalUser.telegram_chat_id ? 'text-emerald-400' : 'text-slate-500'}>
+                  {warnModalUser.telegram_chat_id ? 'Linked ⚡ Direct Message' : 'Not Linked'}
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-slate-400 font-sans font-medium">Active Warnings:</span>
+                <span className="text-rose-400 font-bold">{warnModalUser.warnings_count || 0}</span>
+              </div>
+            </div>
+
+            {/* Preset quick buttons */}
+            <div className="space-y-1.5">
+              <label className="text-[11px] font-semibold text-slate-300 block">
+                Quick Reason Presets:
+              </label>
+              <div className="grid grid-cols-1 gap-1.5">
+                {[
+                  '⚠️ Invalid or fake payment proof submitted.',
+                  '⚠️ Frequent task expiration / scanning delay.',
+                  '⚠️ Real payments only: repeated violations will lead to ban.',
+                  '⚠️ Final notice: 1 more violation will result in account termination.'
+                ].map((preset) => (
+                  <button
+                    key={preset}
+                    type="button"
+                    onClick={() => setWarnReason(preset)}
+                    className="text-left px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] border border-slate-700 transition-colors"
+                  >
+                    {preset}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Custom Reason Textarea */}
+            <div className="space-y-1">
+              <label className="text-[11px] font-semibold text-slate-300 block">
+                Warning Message to User:
+              </label>
+              <textarea
+                rows={3}
+                value={warnReason}
+                onChange={(e) => setWarnReason(e.target.value)}
+                placeholder="Type specific violation or instructions for this user..."
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-amber-500"
+              />
+            </div>
+
+            {/* Delivery Option */}
+            <label className="flex items-center gap-2 cursor-pointer text-xs text-slate-300">
+              <input
+                type="checkbox"
+                checked={warnDeliverTelegram}
+                onChange={(e) => setWarnDeliverTelegram(e.target.checked)}
+                className="rounded border-slate-700 text-amber-500 focus:ring-amber-500 bg-slate-950"
+              />
+              <span>Send direct Telegram alert if linked</span>
+            </label>
+
+            {/* Action Buttons */}
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() => setWarnModalUser(null)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={!warnReason.trim() || isSubmittingWarning}
+                onClick={handleSendWarning}
+                className="px-4 py-2 rounded-xl bg-gradient-to-r from-amber-600 to-rose-600 hover:from-amber-500 hover:to-rose-500 text-white font-bold text-xs flex items-center gap-1.5 shadow-lg shadow-amber-600/20 disabled:opacity-50"
+              >
+                <AlertTriangle className="w-3.5 h-3.5" />
+                <span>{isSubmittingWarning ? 'Dispatching...' : 'Dispatch Official Warning'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Warning Success Toast */}
+      {warningSuccessToast && (
+        <div className="fixed bottom-5 right-5 z-50 bg-amber-500 text-black px-4 py-3 rounded-xl shadow-2xl font-bold text-xs flex items-center gap-2 animate-bounce">
+          <CheckCircle2 className="w-4 h-4" />
+          <span>{warningSuccessToast}</span>
         </div>
       )}
 
