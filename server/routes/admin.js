@@ -294,4 +294,21 @@ router.post('/warn-user', async (req, res) => {
   });
 });
 
+// Reset / lift worker penalty timeout or ban (Super Boss control)
+router.post('/workers/:id/reset-timeout', (req, res) => {
+  const workerId = req.params.id;
+  const user = db.getUser(workerId);
+  if (!user) return res.status(404).json({ error: 'Worker not found' });
+
+  const updated = db.updateUser(workerId, {
+    timeout_until: null,
+    is_banned: false
+  });
+
+  const io = getIO();
+  if (io) io.emit('users_updated');
+
+  res.json({ message: `Timeout/ban lifted for ${user.name}!`, user: updated });
+});
+
 export default router;

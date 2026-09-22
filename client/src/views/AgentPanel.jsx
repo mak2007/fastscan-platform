@@ -665,6 +665,79 @@ export default function AgentPanel({ publisherId = 'agent_prime', presence, soun
         </div>
       </div>
 
+      {/* Pending Trial Reviews Queue (User Requirement: "once a scan done they get option submit for review and then req goes to server side and he confirm if trial was activated or not") */}
+      {awaitingConfirmationTasks.length > 0 && (
+        <div className="bg-gradient-to-r from-[#182a20] to-[#151c19] border-2 border-[#bbf246] rounded-3xl p-5 shadow-2xl shadow-[#bbf246]/10 space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-[#2d4435] pb-3">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-2xl bg-[#bbf246] text-black font-black flex items-center justify-center text-lg shadow-md shadow-[#bbf246]/30">
+                ⚡
+              </div>
+              <div>
+                <h3 className="text-base font-black text-white flex items-center gap-2">
+                  <span>Pending Trial Reviews</span>
+                  <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-[#bbf246] text-black">
+                    {awaitingConfirmationTasks.length} Awaiting Confirmation
+                  </span>
+                </h3>
+                <p className="text-xs text-[#8e9b94]">
+                  Workers submitted these scans for review. Confirm whether trial was activated:
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {awaitingConfirmationTasks.map((ord) => (
+              <div key={ord.id} className="bg-[#0e1411] border border-[#1e2923] hover:border-[#bbf246]/40 rounded-2xl p-4 space-y-3 shadow-md">
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <span className="text-[10px] uppercase tracking-wider font-mono text-[#8e9b94] block">
+                      Order: {ord.id}
+                    </span>
+                    <strong className="text-xs text-white font-mono break-all">
+                      {ord.merchant_reference || ord.id}
+                    </strong>
+                  </div>
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30 shrink-0">
+                    Awaiting Review
+                  </span>
+                </div>
+
+                <div className="bg-[#151c19] rounded-xl p-2.5 text-xs space-y-1 border border-[#1e2923]">
+                  <div className="flex items-center justify-between text-slate-300">
+                    <span>Submitted by Worker:</span>
+                    <strong className="text-white">{ord.claimed_by_name || ord.claimed_by}</strong>
+                  </div>
+                  <div className="flex items-center justify-between text-slate-300">
+                    <span>Scan Fee:</span>
+                    <strong className="text-[#bbf246] font-mono">${(ord.rate || 0.70).toFixed(2)}</strong>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 pt-1">
+                  <button
+                    onClick={() => handleConfirmOrder(ord.id, 'confirm_success')}
+                    className="py-2.5 px-3 rounded-xl bg-[#bbf246] hover:bg-[#a3e635] text-black font-extrabold text-xs flex items-center justify-center gap-1.5 shadow-md shadow-[#bbf246]/20 transition-all active:scale-95"
+                  >
+                    <Check className="w-4 h-4" />
+                    <span>Confirm Trial Activated</span>
+                  </button>
+
+                  <button
+                    onClick={() => handleConfirmOrder(ord.id, 'confirm_failed')}
+                    className="py-2.5 px-3 rounded-xl bg-[#222b26] hover:bg-rose-950/50 text-rose-400 border border-rose-900/50 font-bold text-xs flex items-center justify-center gap-1.5 transition-all active:scale-95"
+                  >
+                    <XCircle className="w-4 h-4" />
+                    <span>Trial NOT Activated (-$0.05)</span>
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Lock Notice if Locked */}
       {limits?.isLocked && (
         <div className="rounded-2xl bg-rose-950/50 border-2 border-rose-500/60 p-5 shadow-xl space-y-3">
@@ -1173,13 +1246,13 @@ export default function AgentPanel({ publisherId = 'agent_prime', presence, soun
                               className="px-3 py-1.5 rounded-lg bg-[#bbf246] hover:bg-[#a3e635] text-black font-extrabold text-xs flex items-center gap-1 shadow-md shadow-[#bbf246]/10"
                             >
                               <Check className="w-3.5 h-3.5" />
-                              <span>Confirm Success</span>
+                              <span>Confirm Trial Activated</span>
                             </button>
                             <button
                               onClick={() => handleConfirmOrder(ord.id, 'confirm_failed')}
-                              className="px-3 py-1.5 rounded-lg bg-[#222b26] text-rose-400 border border-rose-900/40 font-bold text-xs"
+                              className="px-3 py-1.5 rounded-lg bg-[#222b26] hover:bg-rose-950/40 text-rose-400 border border-rose-900/40 font-bold text-xs"
                             >
-                              <span>Reject</span>
+                              <span>Trial NOT Activated (-$0.05)</span>
                             </button>
                           </>
                         )}

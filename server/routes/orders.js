@@ -162,14 +162,15 @@ router.post('/:id/claim', (req, res) => {
     });
   }
 
-  // Enforce max 3 concurrent active tasks
+  // Enforce max 5 concurrent active / in-review tasks per set
+  // User Requirement: "and while its getting reviewd give them opprtunity to scan next qr and they can scan upto 5 times then once all orders are approved after that next set"
   const activeOrders = db.getOrders().filter(o => 
     o.claimed_by === worker.id && 
     (o.status === 'claimed' || o.status === 'awaiting_confirmation')
   );
-  if (activeOrders.length >= 3) {
+  if (activeOrders.length >= 5) {
     return res.status(400).json({
-      error: 'You already have 3 active orders in progress! Complete them before claiming more.'
+      error: 'Set limit reached (5/5 scans)! You already have 5 orders under review / in progress. Please wait for the Agent to approve these scans before scanning the next set.'
     });
   }
 
@@ -258,16 +259,16 @@ router.post('/request-batch', (req, res) => {
     }
   }
 
-  // Count existing active orders
+  // Count existing active orders (max 5 per set)
   const existingActive = db.getOrders().filter(o =>
     o.claimed_by === worker.id &&
     (o.status === 'claimed' || o.status === 'awaiting_confirmation')
   );
 
-  const slotsAvailable = Math.max(0, 3 - existingActive.length);
+  const slotsAvailable = Math.max(0, 5 - existingActive.length);
   if (slotsAvailable === 0) {
     return res.status(400).json({
-      error: 'You already have 3 active orders in progress! Complete them before claiming more.'
+      error: 'Set limit reached (5/5 scans)! You already have 5 orders under review / in progress. Please wait for the Agent to approve these scans before scanning the next set.'
     });
   }
 
@@ -369,21 +370,21 @@ router.post('/:id/complete-task', (req, res) => {
     const worker = db.getUser(worker_id);
     telegramBotService.client.sendMessage(
       publisher.telegram_chat_id,
-      `🔔 <b>Worker Submitted Task!</b>\n` +
+      `🔔 <b>Worker Submitted Scan for Review!</b>\n` +
       `━━━━━━━━━━━━━━━━━━\n` +
       `🆔 <b>Order ID:</b> <code>${order.id}</code>\n` +
       `🏷️ <b>Ref:</b> <code>${order.merchant_reference || order.id}</code>\n` +
       `👤 <b>Worker:</b> ${worker?.name || worker_id}\n` +
       `💰 <b>Scan Fee:</b> $${(order.rate || 0.70).toFixed(2)}\n` +
       `━━━━━━━━━━━━━━━━━━\n` +
-      `Please verify whether the payment was received:`,
+      `Please check whether the trial was activated:`,
       {
         parse_mode: 'HTML',
         reply_markup: {
           inline_keyboard: [
             [
-              { text: `✅ Confirm Success (-$${(order.rate || 0.70).toFixed(2)})`, callback_data: `agent_verify:${order.id}:success` },
-              { text: '❌ Reject / Unsuccess (-$0.05)', callback_data: `agent_verify:${order.id}:failed` }
+              { text: `✅ Confirm Trial Activated`, callback_data: `agent_verify:${order.id}:success` },
+              { text: '❌ Trial NOT Activated (-$0.05)', callback_data: `agent_verify:${order.id}:failed` }
             ]
           ]
         }
@@ -506,6 +507,30 @@ router.post('/:id/confirm', (req, res) => {
           activeTier: nextScanTier.tier,
           balance: +workerNewBal.toFixed(2)
         });
+        ioProgress.emit('scan_result_notification', {
+          workerId: worker.id,
+          orderId,
+          status: 'success',
+          reward,
+          emoji: tierEmoji,
+          balance: +workerNewBal.toFixed(2),
+          message: `🎉 Trial Activated! +${reward}rs ${tierEmoji} credited. New Balance: ₹${workerNewBal.toFixed(2)}`
+        });
+      }
+
+      // Notify worker via Telegram if registered
+      if (worker.telegram_chat_id) {
+        const stats = db.getWorkerDailyStats(worker.id);
+        telegramBotService.client.sendMessage(
+          worker.telegram_chat_id,
+          `🎉 <b>Trial Activated & Verified!</b>\n` +
+          `━━━━━━━━━━━━━━━━━━\n` +
+          `Order <code>${order.id}</code> confirmed.\n` +
+          `💰 <b>+${reward}rs ${tierEmoji}</b> credited!\n` +
+          `💳 <b>New Wallet Balance:</b> <b>₹${workerNewBal.toFixed(2)}</b>\n` +
+          `🎯 <b>Today's Scans:</b> ${stats.todayCount} completed | Active Tier: <b>${stats.rate}rs ${stats.emoji}</b>`,
+          { parse_mode: 'HTML' }
+        ).catch(() => {});
       }
     }
 
@@ -547,6 +572,8 @@ router.post('/:id/confirm', (req, res) => {
     }
 
     // Worker Penalty & strikes:
+    // User Requirement: "give a timeouto if they fail for 3 time in a row 20min timeout"
+    // "show them balance after each scan success or unsuccess"
     if (worker) {
       const workerNewBal = Math.max(0, +((worker.balance || 0) - unsuccessFee).toFixed(2));
       const newFailures = (worker.consecutive_failures || 0) + 1;
@@ -557,12 +584,9 @@ router.post('/:id/confirm', (req, res) => {
       if (newFailures >= 6) {
         isBanned = true;
         penaltyMessage = '6 consecutive failed orders: Worker account is permanently BANNED!';
-      } else if (newFailures >= 4) {
-        newTimeout = new Date(Date.now() + 30 * 60 * 1000).toISOString(); // 30 minutes
-        penaltyMessage = '4 consecutive failed orders: 30 minutes timeout applied!';
-      } else if (newFailures >= 2) {
-        newTimeout = new Date(Date.now() + 2 * 60 * 1000).toISOString(); // 2 minutes
-        penaltyMessage = '2 consecutive failed orders: 2 minutes timeout applied!';
+      } else if (newFailures >= 3) {
+        newTimeout = new Date(Date.now() + 20 * 60 * 1000).toISOString(); // 20 minutes timeout
+        penaltyMessage = '3 consecutive failed orders: 20 minutes cooldown timeout applied!';
       }
 
       db.updateUser(worker.id, {
@@ -580,14 +604,42 @@ router.post('/:id/confirm', (req, res) => {
           consecutiveFailures: newFailures,
           isBanned,
           timeoutUntil: newTimeout,
+          balance: workerNewBal,
           message: penaltyMessage
+        });
+        io.emit('scan_result_notification', {
+          workerId: worker.id,
+          orderId,
+          status: 'trial_not_activated',
+          feeDeducted: unsuccessFee,
+          balance: workerNewBal,
+          consecutiveFailures: newFailures,
+          timeoutUntil: newTimeout,
+          message: `❌ Trial Not Activated: $0.05 fee deducted. New Balance: ₹${workerNewBal.toFixed(2)}${newTimeout ? ' (20-min timeout applied)' : ''}`
         });
       }
 
+      // If worker has telegram, notify them with updated balance and strikes
+      if (worker.telegram_chat_id) {
+        telegramBotService.client.sendMessage(
+          worker.telegram_chat_id,
+          `❌ <b>Order ${order.id}: Trial NOT Activated</b>\n` +
+          `━━━━━━━━━━━━━━━━━━\n` +
+          `⚠️ Agent marked scan as Unsuccessful.\n` +
+          `💸 Fee deducted: <b>-$0.05</b>\n` +
+          `💳 <b>New Wallet Balance:</b> <b>₹${workerNewBal.toFixed(2)}</b>\n` +
+          `⚠️ <b>Consecutive Failures:</b> <b>${newFailures} / 3</b>` +
+          (newTimeout ? `\n⏳ <b>20-Minute Timeout Applied!</b> You can resume scanning in 20 minutes.` : ''),
+          { parse_mode: 'HTML' }
+        ).catch(() => {});
+      }
+
       return res.json({
-        message: 'Order marked as Failed / Unsuccessful ($0.05 unsuccess fee deducted).',
+        message: 'Order marked as Failed / Trial Not Activated ($0.05 unsuccess fee deducted).',
         order: updatedOrder,
         unsuccessFee,
+        workerBalance: workerNewBal,
+        consecutiveFailures: newFailures,
         workerPenalty: penaltyMessage
       });
     }
@@ -801,7 +853,61 @@ router.post('/:id/manual-verify', (req, res) => {
 
     if (worker) {
       const workerNewBal = Math.max(0, +((worker.balance || 0) - unsuccessFee).toFixed(2));
-      db.updateUser(worker.id, { balance: workerNewBal });
+      const newFailures = (worker.consecutive_failures || 0) + 1;
+      let newTimeout = null;
+      let isBanned = false;
+      let penaltyMessage = '';
+
+      if (newFailures >= 6) {
+        isBanned = true;
+        penaltyMessage = '6 consecutive failed orders: Worker account is permanently BANNED!';
+      } else if (newFailures >= 3) {
+        newTimeout = new Date(Date.now() + 20 * 60 * 1000).toISOString(); // 20 minutes timeout
+        penaltyMessage = '3 consecutive failed orders: 20 minutes cooldown timeout applied!';
+      }
+
+      db.updateUser(worker.id, {
+        balance: workerNewBal,
+        consecutive_failures: newFailures,
+        timeout_until: newTimeout,
+        is_banned: isBanned
+      });
+
+      const ioPenalty = getIO();
+      if (ioPenalty) {
+        ioPenalty.emit('worker_penalty', {
+          workerId: worker.id,
+          consecutiveFailures: newFailures,
+          isBanned,
+          timeoutUntil: newTimeout,
+          balance: workerNewBal,
+          message: penaltyMessage
+        });
+        ioPenalty.emit('scan_result_notification', {
+          workerId: worker.id,
+          orderId,
+          status: 'trial_not_activated',
+          feeDeducted: unsuccessFee,
+          balance: workerNewBal,
+          consecutiveFailures: newFailures,
+          timeoutUntil: newTimeout,
+          message: `❌ Trial Not Activated: $0.05 fee deducted. New Balance: ₹${workerNewBal.toFixed(2)}${newTimeout ? ' (20-min timeout applied)' : ''}`
+        });
+      }
+
+      if (worker.telegram_chat_id) {
+        telegramBotService.client.sendMessage(
+          worker.telegram_chat_id,
+          `❌ <b>Order ${order.id}: Trial NOT Activated</b>\n` +
+          `━━━━━━━━━━━━━━━━━━\n` +
+          `⚠️ Agent marked scan as Unsuccessful.\n` +
+          `💸 Fee deducted: <b>-$0.05</b>\n` +
+          `💳 <b>New Wallet Balance:</b> <b>₹${workerNewBal.toFixed(2)}</b>\n` +
+          `⚠️ <b>Consecutive Failures:</b> <b>${newFailures} / 3</b>` +
+          (newTimeout ? `\n⏳ <b>20-Minute Timeout Applied!</b> You can resume scanning in 20 minutes.` : ''),
+          { parse_mode: 'HTML' }
+        ).catch(() => {});
+      }
     }
 
     const io = getIO();

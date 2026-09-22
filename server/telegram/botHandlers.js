@@ -825,7 +825,7 @@ export class TelegramBotService {
         reply_markup: {
           inline_keyboard: [
             [
-              { text: '✅ Completed (Paid)', callback_data: `complete_task:${order.id}:success` },
+              { text: '📤 Submit for Review', callback_data: `complete_task:${order.id}:success` },
               { text: '❌ Expired / Failed', callback_data: `complete_task:${order.id}:failed` }
             ],
             [
@@ -855,12 +855,16 @@ export class TelegramBotService {
         worker_completed_at: now
       });
 
-      await this.client.answerCallbackQuery(callbackId, 'Submitted as Completed!');
+      const nextScanTier = db.getRewardForNextScan(worker.id);
+      await this.client.answerCallbackQuery(callbackId, 'Submitted for Review!');
       await this.client.sendMessage(
         chatId,
-        `✅ <b>Task Submitted!</b> Awaiting confirmation from Agent / Merchant.\n` +
-        `Once confirmed, <b>+$${(order.worker_rate || 0.40).toFixed(2)}</b> will be credited to your balance.\n\n` +
-        `Tap <b>🔍 Scan for Orders</b> to continue scanning.`,
+        `📤 <b>Scan Submitted for Review!</b>\n` +
+        `━━━━━━━━━━━━━━━━━━\n` +
+        `Awaiting Agent confirmation whether trial was activated.\n` +
+        `💰 Expected Reward upon confirmation: <b>+${nextScanTier.rate}rs ${nextScanTier.emoji}</b>\n\n` +
+        `🚀 <i>You can scan up to 5 QRs while this is being reviewed!</i>\n` +
+        `Tap <b>🔍 Scan for Next Order</b> to continue your set:`,
         {
           parse_mode: 'HTML',
           reply_markup: {
@@ -873,7 +877,23 @@ export class TelegramBotService {
     } else {
       // Marked failed
       const strikes = (worker.consecutive_failures || 0) + 1;
-      db.updateUser(worker.id, { consecutive_failures: strikes });
+      let newTimeout = null;
+      let isBanned = false;
+      let timeoutNotice = '';
+
+      if (strikes >= 6) {
+        isBanned = true;
+        timeoutNotice = '\n🚨 <b>6 consecutive failures: Account is permanently banned!</b>';
+      } else if (strikes >= 3) {
+        newTimeout = new Date(Date.now() + 20 * 60 * 1000).toISOString(); // 20 minutes timeout
+        timeoutNotice = '\n⏳ <b>20-Minute Timeout Applied!</b> (3 consecutive failures). You can resume scanning in 20 minutes.';
+      }
+
+      db.updateUser(worker.id, {
+        consecutive_failures: strikes,
+        timeout_until: newTimeout,
+        is_banned: isBanned
+      });
       db.updateOrder(orderId, {
         status: 'trial_not_activated',
         worker_status: 'failed',
@@ -884,7 +904,7 @@ export class TelegramBotService {
       await this.client.sendMessage(
         chatId,
         `❌ <b>Task Marked as Expired / Failed.</b>\n` +
-        `Failure strikes: <b>${strikes} / 6</b> (2=2m, 4=30m, 6=Ban).\n\n` +
+        `Failure strikes: <b>${strikes} / 3</b> (3 strikes = 20-min timeout).${timeoutNotice}\n\n` +
         `⚠️ <i>Did you make a mistake? If payment actually went through, tap Appeal below to submit your bank UTR:</i>`,
         {
           parse_mode: 'HTML',
@@ -1667,9 +1687,30 @@ export class TelegramBotService {
         });
       }
 
+      let strikes = 0;
+      let newTimeout = null;
+      let isBanned = false;
+      let penaltyMessage = '';
+      let workerNewBal = 0;
+
       if (worker) {
-        const workerNewBal = Math.max(0, +((worker.balance || 0) - unsuccessFee).toFixed(2));
-        db.updateUser(worker.id, { balance: workerNewBal });
+        workerNewBal = Math.max(0, +((worker.balance || 0) - unsuccessFee).toFixed(2));
+        strikes = (worker.consecutive_failures || 0) + 1;
+
+        if (strikes >= 6) {
+          isBanned = true;
+          penaltyMessage = '6 consecutive failed orders: Worker account is permanently BANNED!';
+        } else if (strikes >= 3) {
+          newTimeout = new Date(Date.now() + 20 * 60 * 1000).toISOString(); // 20 minutes timeout
+          penaltyMessage = '3 consecutive failed orders: 20 minutes cooldown timeout applied!';
+        }
+
+        db.updateUser(worker.id, {
+          balance: workerNewBal,
+          consecutive_failures: strikes,
+          timeout_until: newTimeout,
+          is_banned: isBanned
+        });
       }
 
       db.updateOrder(orderId, {
@@ -1688,6 +1729,24 @@ export class TelegramBotService {
             status: 'trial_not_activated',
             verifiedBy: agent ? agent.name : 'Agent via Telegram'
           });
+          io.emit('worker_penalty', {
+            workerId: worker?.id,
+            consecutiveFailures: strikes,
+            isBanned,
+            timeoutUntil: newTimeout,
+            balance: workerNewBal,
+            message: penaltyMessage
+          });
+          io.emit('scan_result_notification', {
+            workerId: worker?.id,
+            orderId,
+            status: 'trial_not_activated',
+            feeDeducted: unsuccessFee,
+            balance: workerNewBal,
+            consecutiveFailures: strikes,
+            timeoutUntil: newTimeout,
+            message: `❌ Trial Not Activated: $0.05 fee deducted. New Balance: ₹${workerNewBal.toFixed(2)}${newTimeout ? ' (20-min timeout applied)' : ''}`
+          });
           io.emit('orders_refresh');
         }
       } catch (e) {}
@@ -1695,7 +1754,15 @@ export class TelegramBotService {
       if (worker && worker.telegram_chat_id) {
         await this.client.sendMessage(
           worker.telegram_chat_id,
-          `⚠️ <b>Order ${order.id} Rejected:</b> Agent marked payment as not received.\nIf this was a mistake, you can submit an Appeal with UTR proof.`
+          `❌ <b>Order ${order.id}: Trial NOT Activated</b>\n` +
+          `━━━━━━━━━━━━━━━━━━\n` +
+          `⚠️ Agent marked scan as Unsuccessful.\n` +
+          `💸 Fee deducted: <b>-$0.05</b>\n` +
+          `💳 <b>New Wallet Balance:</b> <b>₹${workerNewBal.toFixed(2)}</b>\n` +
+          `⚠️ <b>Consecutive Failures:</b> <b>${strikes} / 3</b>` +
+          (newTimeout ? `\n⏳ <b>20-Minute Timeout Applied!</b> You can resume scanning in 20 minutes.` : '') +
+          `\n\n<i>If this was a mistake, you can submit an Appeal with UTR proof.</i>`,
+          { parse_mode: 'HTML' }
         );
       }
 

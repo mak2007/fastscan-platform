@@ -95,7 +95,35 @@ export default function RoleSwitcher({ currentRole, currentUserId, currentUser, 
           </div>
 
           {/* RIGHT: Role Actions & Key Access */}
+          {/* RIGHT: Role Actions & Key Access */}
           <div className="flex items-center gap-2">
+            {/* Direct Switcher: User Requirement "give agent panel" */}
+            {currentRole === 'worker' ? (
+              <button
+                onClick={() => onSelectRole('agent', 'agent_prime')}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-black bg-[#bbf246] hover:bg-[#a3e635] text-black shadow-md shadow-[#bbf246]/20 transition-all active:scale-95"
+                title="Switch to Agent / Merchant Panel"
+              >
+                <span>⚡ Open Agent Panel</span>
+              </button>
+            ) : currentRole === 'agent' ? (
+              <button
+                onClick={() => onSelectRole('worker', 'worker_alex')}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-[#152e2a] hover:bg-[#1a3833] text-[#2dd4bf] border border-[#2dd4bf]/40 transition-all shadow-sm active:scale-95"
+                title="Switch to Worker Panel (Task Hall)"
+              >
+                <span>⚡ Open Worker Panel</span>
+              </button>
+            ) : (
+              <button
+                onClick={() => onSelectRole('agent', 'agent_prime')}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-black bg-[#bbf246] hover:bg-[#a3e635] text-black shadow-md shadow-[#bbf246]/20 transition-all active:scale-95"
+                title="Open Agent Panel"
+              >
+                <span>⚡ Open Agent Panel</span>
+              </button>
+            )}
+
             {/* Superadmin cross-link only for Boss / Agent */}
             {currentRole === 'agent' && (
               <button
@@ -104,16 +132,6 @@ export default function RoleSwitcher({ currentRole, currentUserId, currentUser, 
                 title="Open Superadmin Master Console"
               >
                 Superadmin &rarr;
-              </button>
-            )}
-
-            {currentRole === 'boss' && (
-              <button
-                onClick={() => onSelectRole('agent', 'agent_prime')}
-                className="text-xs text-[#bbf246] hover:underline px-2 py-1 transition-colors"
-                title="View L1 Boss Panel"
-              >
-                L1 Boss Console &rarr;
               </button>
             )}
 

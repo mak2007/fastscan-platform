@@ -98,6 +98,7 @@ export default function WorkerPanel({ workerId = 'worker_alex', presence, soundE
   const [isOnline, setIsOnline] = useState(true);
   const [timeoutRemaining, setTimeoutRemaining] = useState(0);
   const [urgentWarning, setUrgentWarning] = useState(null);
+  const [scanResultToast, setScanResultToast] = useState(null);
 
   // Orders
   const [availableOrders, setAvailableOrders] = useState([]);
@@ -187,7 +188,7 @@ export default function WorkerPanel({ workerId = 'worker_alex', presence, soundE
     }
   };
 
-  // Batch Request up to 3 Orders (User Requirement: "claim upto 3 orders at a time click on request 3 orders")
+  // Batch Request up to 5 Orders per Set (User Requirement: "and while its getting reviewd give them opprtunity to scan next qr and they can scan upto 5 times then once all orders are approved after that next set")
   const handleBatchClaimOrders = async () => {
     if (!isOnline) {
       alert(language === 'zh' ? "您当前离线！请先在上方切换为在线状态。" : "You are currently OFFLINE! Please toggle Online status above to claim orders.");
@@ -201,20 +202,21 @@ export default function WorkerPanel({ workerId = 'worker_alex', presence, soundE
       alert(`You are in penalty timeout for another ${timeoutRemaining}s!`);
       return;
     }
-    if (claimedTasks.length >= 3) {
-      alert(language === 'zh' ? "您最多只能同时持有3个进行中的任务！请先完成当前任务。" : "You can hold a maximum of 3 active tasks at a time! Please complete existing tasks first.");
+    if (claimedTasks.length >= 5) {
+      alert(language === 'zh' ? "当前批次已达到5个任务上限！请等待代理审核通过后再认领下一批次。" : "Set limit reached (5/5 scans)! You can hold up to 5 scans in progress/review. Please wait for the Agent to approve them before scanning the next set.");
       return;
     }
 
     try {
       setIsBatchRequesting(true);
-      const res = await api.requestBatchOrders(workerId, 3);
+      const slotsNeeded = Math.min(5, 5 - claimedTasks.length);
+      const res = await api.requestBatchOrders(workerId, slotsNeeded);
       if (res.claimed_orders && res.claimed_orders.length > 0) {
         if (soundEnabled) soundFX.playClaimChime();
         alert(
           language === 'zh'
-            ? `成功认领 ${res.claimed_orders.length} 个任务！(当前进行中: ${res.current_active_count}/3)`
-            : `Successfully claimed ${res.claimed_orders.length} order(s)! (Active: ${res.current_active_count}/3)`
+            ? `成功认领 ${res.claimed_orders.length} 个任务！(当前批次进行中: ${res.current_active_count}/5)`
+            : `Successfully claimed ${res.claimed_orders.length} order(s)! (Current set: ${res.current_active_count}/5)`
         );
         setActiveTab('claimed');
         loadOrders();
@@ -435,6 +437,21 @@ export default function WorkerPanel({ workerId = 'worker_alex', presence, soundE
       }
     };
 
+    const handleScanResultNotification = (resData) => {
+      if (resData.workerId === workerId) {
+        setScanResultToast(resData);
+        if (soundEnabled) {
+          if (resData.status === 'success') soundFX.playSuccessChime();
+          else soundFX.playWarningBuzzer();
+        }
+        loadWorker();
+        loadOrders();
+        setTimeout(() => {
+          setScanResultToast((curr) => (curr?.orderId === resData.orderId ? null : curr));
+        }, 8000);
+      }
+    };
+
     socket.on('new_order_available', handleNewOrder);
     socket.on('order_claimed', handleOrderClaimed);
     socket.on('order_manually_verified', handleOrderManuallyVerified);
@@ -442,6 +459,7 @@ export default function WorkerPanel({ workerId = 'worker_alex', presence, soundE
     socket.on('bot_message_received', handleBotMessageReceived);
     socket.on('user_warned', handleUserWarned);
     socket.on('worker_daily_progress_updated', handleDailyProgress);
+    socket.on('scan_result_notification', handleScanResultNotification);
     socket.on('orders_refresh', () => {
       loadOrders();
       loadAppeals();
@@ -456,6 +474,7 @@ export default function WorkerPanel({ workerId = 'worker_alex', presence, soundE
       socket.off('bot_message_received', handleBotMessageReceived);
       socket.off('user_warned', handleUserWarned);
       socket.off('worker_daily_progress_updated', handleDailyProgress);
+      socket.off('scan_result_notification', handleScanResultNotification);
       socket.off('orders_refresh', loadOrders);
     };
   }, [workerId, soundEnabled, isOnline]);
@@ -1253,6 +1272,36 @@ export default function WorkerPanel({ workerId = 'worker_alex', presence, soundE
               </div>
             </div>
 
+            {/* 5-Scan Pipeline Tracker Card (User Requirement: "while its getting reviewd give them opprtunity to scan next qr and they can scan upto 5 times then once all orders are approved after that next set") */}
+            {claimedTasks.length > 0 && (
+              <div className="bg-gradient-to-r from-[#121e19] to-[#151c19] border border-[#2dd4bf]/30 rounded-2xl p-4 shadow-lg flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-black uppercase tracking-wider text-[#2dd4bf]">
+                      Current 5-Scan Set Tracker
+                    </span>
+                    <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-[#0e1411] text-[#bbf246] border border-[#bbf246]/30">
+                      {claimedTasks.length} / 5 Scans Active
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-300">
+                    {claimedTasks.length >= 5
+                      ? "⚠️ Current set full (5/5). Once Agent confirms trial activations, your next set unlocks!"
+                      : `⚡ You can scan ${5 - claimedTasks.length} more QR${5 - claimedTasks.length === 1 ? '' : 's'} while waiting for reviews.`}
+                  </p>
+                </div>
+                {claimedTasks.length < 5 && (
+                  <button
+                    onClick={() => setActiveTab('hall')}
+                    className="px-4 py-2 rounded-xl bg-[#bbf246] hover:bg-[#a3e635] text-black font-extrabold text-xs flex items-center justify-center gap-1.5 shadow-md shadow-[#bbf246]/20 shrink-0 active:scale-95 transition-all"
+                  >
+                    <Zap className="w-4 h-4" />
+                    <span>Scan Next QR ({5 - claimedTasks.length} left)</span>
+                  </button>
+                )}
+              </div>
+            )}
+
             {claimedTasks.length === 0 ? (
               <div className="bg-[#151c19] border border-[#1e2923] rounded-2xl p-8 text-center space-y-2">
                 <div className="w-10 h-10 rounded-full bg-[#1e2923] flex items-center justify-center mx-auto text-[#8e9b94]">
@@ -1371,24 +1420,56 @@ export default function WorkerPanel({ workerId = 'worker_alex', presence, soundE
                       </button>
                     </div>
 
-                    {/* Row 2 Actions: Completed & Expired (matching Screenshot 2) */}
-                    <div className="grid grid-cols-2 gap-2">
-                      <button
-                        onClick={() => handleCompleteTask(ord.id, 'success')}
-                        className="py-3 px-3 rounded-xl bg-[#bbf246] hover:bg-[#a3e635] text-black font-extrabold text-xs flex items-center justify-center gap-1.5 shadow-md shadow-[#bbf246]/10 active:scale-[0.98] transition-all"
-                      >
-                        <Check className="w-4 h-4" />
-                        <span>{language === 'zh' ? '完成' : 'Completed'}</span>
-                      </button>
+                    {/* Row 2 Actions: Submit for Review & Expired / Status if under review */}
+                    {ord.status === 'awaiting_confirmation' ? (
+                      <div className="p-3.5 rounded-2xl bg-[#152e2a] border border-[#2dd4bf]/40 flex flex-col gap-2.5">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2 text-xs font-bold text-[#2dd4bf]">
+                            <Clock className="w-4 h-4 animate-spin text-[#2dd4bf]" />
+                            <span>Submitted for Review! Waiting for Agent trial check</span>
+                          </div>
+                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#0a1614] text-[#2dd4bf] font-bold border border-[#2dd4bf]/30">
+                            Set: {claimedTasks.length}/5
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-slate-300">
+                          {claimedTasks.length < 5
+                            ? `You can scan up to 5 QRs while this is being reviewed. ${5 - claimedTasks.length} slots left in this set.`
+                            : "Set limit reached (5/5). Please wait for the Agent to confirm trial activations before the next set."}
+                        </p>
+                        {claimedTasks.length < 5 ? (
+                          <button
+                            onClick={() => setActiveTab('hall')}
+                            className="w-full py-2.5 px-3 rounded-xl bg-[#bbf246] hover:bg-[#a3e635] text-black font-extrabold text-xs flex items-center justify-center gap-1.5 shadow-md shadow-[#bbf246]/10 active:scale-95 transition-all"
+                          >
+                            <Zap className="w-4 h-4" />
+                            <span>Scan Next QR ({5 - claimedTasks.length} slots left in set) &rarr;</span>
+                          </button>
+                        ) : (
+                          <div className="text-[11px] font-bold text-amber-400 bg-amber-950/40 p-2 rounded-xl border border-amber-900/50 text-center">
+                            ⏳ Set Full (5/5). Awaiting Agent trial confirmation!
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-2 gap-2">
+                        <button
+                          onClick={() => handleCompleteTask(ord.id, 'success')}
+                          className="py-3 px-3 rounded-xl bg-[#bbf246] hover:bg-[#a3e635] text-black font-extrabold text-xs flex items-center justify-center gap-1.5 shadow-md shadow-[#bbf246]/10 active:scale-[0.98] transition-all"
+                        >
+                          <Send className="w-4 h-4" />
+                          <span>{language === 'zh' ? '提交审核' : '📤 Submit for Review'}</span>
+                        </button>
 
-                      <button
-                        onClick={() => handleCompleteTask(ord.id, 'failed')}
-                        className="py-3 px-3 rounded-xl bg-[#222b26] hover:bg-rose-950/40 text-rose-400 border border-rose-900/40 font-bold text-xs flex items-center justify-center gap-1.5 transition-all"
-                      >
-                        <XCircle className="w-4 h-4" />
-                        <span>{language === 'zh' ? '过期 / 失败' : 'Expired'}</span>
-                      </button>
-                    </div>
+                        <button
+                          onClick={() => handleCompleteTask(ord.id, 'failed')}
+                          className="py-3 px-3 rounded-xl bg-[#222b26] hover:bg-rose-950/40 text-rose-400 border border-rose-900/40 font-bold text-xs flex items-center justify-center gap-1.5 transition-all"
+                        >
+                          <XCircle className="w-4 h-4" />
+                          <span>{language === 'zh' ? '过期 / 失败' : 'Expired / Failed'}</span>
+                        </button>
+                      </div>
+                    )}
 
                     {/* Row 3: Manual Verification & Worker Appeal (Up to 3 normal appeals) */}
                     <div className="pt-2 border-t border-[#1e2923] flex flex-col gap-2">
@@ -2322,6 +2403,39 @@ export default function WorkerPanel({ workerId = 'worker_alex', presence, soundE
             >
               I Understand & Acknowledge
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Real-Time Scan Result Balance Notification Popover (User Requirement: "show them balance after each scan success or unsuccess") */}
+      {scanResultToast && (
+        <div className="fixed bottom-6 right-6 z-50 max-w-sm w-full bg-[#121a16] border-2 border-[#2dd4bf] rounded-2xl p-4 shadow-2xl animate-bounce-short">
+          <div className="flex items-start gap-3">
+            <div className={`p-2.5 rounded-xl shrink-0 ${scanResultToast.status === 'success' ? 'bg-[#bbf246]/20 text-[#bbf246]' : 'bg-rose-500/20 text-rose-400'}`}>
+              {scanResultToast.status === 'success' ? <CheckCircle2 className="w-6 h-6" /> : <XCircle className="w-6 h-6" />}
+            </div>
+            <div className="flex-1 space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className={`text-xs font-black uppercase tracking-wider ${scanResultToast.status === 'success' ? 'text-[#bbf246]' : 'text-rose-400'}`}>
+                  {scanResultToast.status === 'success' ? '🎉 Trial Activated' : '❌ Trial NOT Activated'}
+                </span>
+                <button
+                  onClick={() => setScanResultToast(null)}
+                  className="text-slate-400 hover:text-white text-xs p-1"
+                >
+                  ✕
+                </button>
+              </div>
+              <p className="text-xs text-slate-200 leading-snug">
+                {scanResultToast.message}
+              </p>
+              <div className="pt-2 border-t border-[#1e2923] flex items-center justify-between">
+                <span className="text-[11px] text-slate-400">Current Wallet Balance:</span>
+                <strong className="text-sm font-mono font-bold text-[#bbf246]">
+                  ₹{Number(scanResultToast.balance || 0).toFixed(2)} rs
+                </strong>
+              </div>
+            </div>
           </div>
         </div>
       )}
